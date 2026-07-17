@@ -1,0 +1,12 @@
+# SLURM logs and stray job output
+logs/
+*.err
+*.out
+
+# Editor/manual backups (git is the history now)
+*.bak
+*.bak-*
+
+# Python
+__pycache__/
+*.pyc
