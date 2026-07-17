@@ -18,7 +18,7 @@
 # how the BOLD response scales with rating.
 #
 # One GLM per participant / session / task. Each GLM has:
-#   6 motion nuisance regressors (-stim_base)
+#   24 motion nuisance regressors (Friston-24, via -ortvec)
 #   1 amplitude-modulated stimulus regressor (AM2 -> two betas):
 #       rating[0] = mean response (overall activation)
 #       rating[1] = parametric SLOPE (BOLD vs rating) <-- result of interest
@@ -189,7 +189,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             "
 
             # ------------------------------------------------------------------
-            # STEP 3: Extract 6 motion parameters from fMRIPrep confounds TSV.
+            # STEP 3: Extract 24 motion regressors (Friston-24) from fMRIPrep confounds TSV.
             # Python parser (not 1dcat) so 'n/a' cells -> 0 (fMRIPrep writes n/a
             # in the first row of motion derivatives).
             # ------------------------------------------------------------------
@@ -210,6 +210,8 @@ with open('${CONFOUNDS}') as f:
 
             # ------------------------------------------------------------------
             # STEP 4: Demean motion + build censor file (FD > 0.3mm excluded)
+            # Censor uses only the 6 BASE rigid-body params (cols 0,4,8,12,16,20);
+            # -censor_motion assumes 6 params, so feeding all 24 would give a wrong FD.
             # ------------------------------------------------------------------
             ${AFNI} "
                 1d_tool.py \
@@ -218,7 +220,7 @@ with open('${CONFOUNDS}') as f:
                     -write ${OUT_DIR}/${PREFIX}_motion_demean.txt
 
                 1d_tool.py \
-                    -infile ${OUT_DIR}/${PREFIX}_motion_demean.txt \
+                    -infile ${OUT_DIR}/${PREFIX}_motion_demean.txt'[0,4,8,12,16,20]' \
                     -show_censor_count \
                     -censor_prev_TR \
                     -censor_motion ${MOTION_THRESH} \
@@ -243,17 +245,12 @@ with open('${CONFOUNDS}') as f:
                     -TR_times ${TR} \
                     -censor ${OUT_DIR}/${PREFIX}_motion_censor.1D \
                     \
-                    -num_stimts 7 \
+                    -num_stimts 1 \
                     \
-                    -stim_file 1 ${OUT_DIR}/${PREFIX}_motion_demean.txt'[0]' -stim_base 1 -stim_label 1 trans_x \
-                    -stim_file 2 ${OUT_DIR}/${PREFIX}_motion_demean.txt'[1]' -stim_base 2 -stim_label 2 trans_y \
-                    -stim_file 3 ${OUT_DIR}/${PREFIX}_motion_demean.txt'[2]' -stim_base 3 -stim_label 3 trans_z \
-                    -stim_file 4 ${OUT_DIR}/${PREFIX}_motion_demean.txt'[3]' -stim_base 4 -stim_label 4 rot_x \
-                    -stim_file 5 ${OUT_DIR}/${PREFIX}_motion_demean.txt'[4]' -stim_base 5 -stim_label 5 rot_y \
-                    -stim_file 6 ${OUT_DIR}/${PREFIX}_motion_demean.txt'[5]' -stim_base 6 -stim_label 6 rot_z \
+                    -ortvec ${OUT_DIR}/${PREFIX}_motion_demean.txt motion \
                     \
-                    -stim_times_AM2 7 ${TIMING} 'BLOCK(${BLOCK_DUR},1)' \
-                        -stim_label 7 rating \
+                    -stim_times_AM2 1 ${TIMING} 'BLOCK(${BLOCK_DUR},1)' \
+                        -stim_label 1 rating \
                     \
                     -num_glt 2 \
                     -gltsym 'SYM: rating[0]' -glt_label 1 mean_response \
