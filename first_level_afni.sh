@@ -197,7 +197,12 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
 import csv
 with open('${CONFOUNDS}') as f:
     reader = csv.DictReader(f, delimiter='\t')
-    cols = ['trans_x','trans_y','trans_z','rot_x','rot_y','rot_z']
+    cols = ['trans_x','trans_x_derivative1','trans_x_derivative1_power2','trans_x_power2',
+            'trans_y','trans_y_derivative1','trans_y_derivative1_power2','trans_y_power2',
+            'trans_z','trans_z_derivative1','trans_z_derivative1_power2','trans_z_power2',
+            'rot_x','rot_x_derivative1','rot_x_power2','rot_x_derivative1_power2',
+            'rot_y','rot_y_derivative1','rot_y_power2','rot_y_derivative1_power2',
+            'rot_z','rot_z_derivative1','rot_z_power2','rot_z_derivative1_power2']
     for row in reader:
         vals = ['0' if row[c] in ('n/a','') else row[c] for c in cols]
         print(' '.join(vals))
