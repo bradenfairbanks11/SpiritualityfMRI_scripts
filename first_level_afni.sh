@@ -59,7 +59,7 @@ BIND=/nobackup/archive/usr/bradenf4
 # --- Acquisition parameters (known) ---
 TR=1.388
 SMOOTH_FWHM=4.0
-MOTION_THRESH=0.3
+MOTION_THRESH=1
 
 # --- Tasks (BIDS labels: F=FHS, S=scripture, A=architecture per dcm2niix) ---
 TASKS=(scripture FHS architecture)
@@ -173,7 +173,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             "
 
             # ------------------------------------------------------------------
-            # STEP 2: Scale to percent signal change (cap at 200)
+            # STEP 2: Scale to percent signal change (cap at 10000 for now)
             # ------------------------------------------------------------------
             ${AFNI} "
                 3dTstat \
@@ -184,7 +184,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 3dcalc \
                      e- ${OUT_DIR}/${PREFIX}_blurred.nii.gz \
                     -b ${OUT_DIR}/${PREFIX}_blurred_mean.nii.gz \
-                    -expr 'min(200, a/b*100)*step(a)*step(b)' \
+                    -expr 'min(10000, a/b*100)*step(a)*step(b)' \
                     -prefix ${OUT_DIR}/${PREFIX}_blurred_scaled.nii.gz
             "
 
