@@ -182,7 +182,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                     ${OUT_DIR}/${PREFIX}_blurred.nii.gz
 
                 3dcalc \
-                     e- ${OUT_DIR}/${PREFIX}_blurred.nii.gz \
+                    -a ${OUT_DIR}/${PREFIX}_blurred.nii.gz \
                     -b ${OUT_DIR}/${PREFIX}_blurred_mean.nii.gz \
                     -expr 'min(10000, a/b*100)*step(a)*step(b)' \
                     -prefix ${OUT_DIR}/${PREFIX}_blurred_scaled.nii.gz
