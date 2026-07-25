@@ -97,9 +97,13 @@ JSON
             [ -f "${BIDS_ECHO1}" ] || continue
             EXPECTED_COUNT=$((EXPECTED_COUNT + 1))
             FN=$(basename "${BIDS_ECHO1}")
-            SES=$(echo "${FN}" | grep -oP 'ses-\K[^_]+')
+            # Use a loop-local name here: reusing "SES" would clobber the
+            # session-control variable checked above and leak the last file's
+            # session into the NEXT participant's iteration (filtering sub-02+
+            # to ses-2 even when SES was never set).
+            GUARD_SES=$(echo "${FN}" | grep -oP 'ses-\K[^_]+')
             TASK=$(echo "${FN}" | grep -oP 'task-\K[^_]+')
-            MNI_OUT=${TEDANA_OUT}/${PARTICIPANT_ID}/ses-${SES}/func/${PARTICIPANT_ID}_ses-${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
+            MNI_OUT=${TEDANA_OUT}/${PARTICIPANT_ID}/ses-${GUARD_SES}/func/${PARTICIPANT_ID}_ses-${GUARD_SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
             [ -f "${MNI_OUT}" ] && DONE_COUNT=$((DONE_COUNT + 1))
         done
 
