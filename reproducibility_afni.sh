@@ -41,7 +41,11 @@
 #            sbatch reproducibility_afni.sh            (all sub-* with first-levels)
 # =============================================================================
 
-set -e
+# NOTE: intentionally NOT using `set -e`. A single AFNI/container failure on one
+# subject/task must not abort the whole batch -- each task is guarded explicitly
+# and skips forward on failure (see mask guard + threshold guard below). pipefail
+# is on so a failing stage in a `cmd | tail | awk` pipeline is detectable.
+set -o pipefail
 
 # ==============================================================================
 # CONFIGURATION
@@ -88,6 +92,20 @@ add_metric() {  # args: participant task contrast map metric value
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" >> "${SUMMARY}"
 }
 
+# Run an AFNI command that is expected to print a single scalar on its last line
+# and echo that value. If nothing comes back (AFNI/container error, unknown flag,
+# missing sub-brick), warn loudly and echo "NA" so the gap is visible in the TSV
+# instead of a silent blank cell.
+afni_scalar() {  # args: description  afni_command_string
+    local desc="$1" cmd="$2" val
+    val=$(${AFNI} "${cmd}" 2>/dev/null | tail -n1 | awk '{print $1}')
+    if [ -z "${val}" ]; then
+        echo "  WARN: ${desc} -- AFNI produced no value; recording NA" >&2
+        val=NA
+    fi
+    printf '%s' "${val}"
+}
+
 # ==============================================================================
 # LOOP: participants -> tasks   (ses-1 vs ses-2 compared inside each task)
 # ==============================================================================
@@ -103,6 +121,11 @@ else
     echo "WARNING: no participant labels given -> defaulting to ALL sub-* in ${AFNI_OUT}"
     PARTICIPANT_DIRS=("${AFNI_OUT}"/sub-*)
 fi
+
+# Count task-comparisons that actually ran. If NOTHING runs (e.g. the whole node
+# has a broken container), we exit non-zero at the end so the FAIL email fires
+# rather than reporting a silently "successful" empty run.
+PROCESSED=0
 
 for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
     if [ ! -d "${PARTICIPANT_DIR}" ]; then
@@ -153,6 +176,15 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             3dmask_tool -overwrite -input ${OUT}/mask_${SES1}.nii.gz ${OUT}/mask_${SES2}.nii.gz -inter -prefix ${MASK}
         "
 
+        # If the mask never got built, the container/AFNI failed on this node
+        # (this is exactly what killed the 2026-07-20 run: the compute node had
+        # no /dev/fuse). Skip this task instead of aborting the whole batch.
+        if [ ! -f "${MASK}" ]; then
+            echo "skip: ${PARTICIPANT_ID} task-${TASK} -- mask build failed (AFNI/container error on this node?)"
+            continue
+        fi
+        PROCESSED=$((PROCESSED + 1))
+
         # ------------------------------------------------------------------
         # Per contrast: spatial correlation (beta & t), Dice (t), scatter, diff.
         # ------------------------------------------------------------------
@@ -161,8 +193,8 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             TSTAT="${CON}#0_Tstat"
 
             # --- STEP B: spatial correlation (Pearson r) within the mask ---
-            R_BETA=$(${AFNI}  "3ddot -docor -mask ${MASK} ${S1}'[${COEF}]'  ${S2}'[${COEF}]'"  2>/dev/null | tail -n1 | awk '{print $1}')
-            R_TSTAT=$(${AFNI} "3ddot -docor -mask ${MASK} ${S1}'[${TSTAT}]' ${S2}'[${TSTAT}]'" 2>/dev/null | tail -n1 | awk '{print $1}')
+            R_BETA=$(afni_scalar  "r(beta) ${PARTICIPANT_ID}/${TASK}/${CON}"  "3ddot -docor -mask ${MASK} ${S1}'[${COEF}]'  ${S2}'[${COEF}]'")
+            R_TSTAT=$(afni_scalar "r(t) ${PARTICIPANT_ID}/${TASK}/${CON}"     "3ddot -docor -mask ${MASK} ${S1}'[${TSTAT}]' ${S2}'[${TSTAT}]'")
             add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" beta  spatial_r "${R_BETA}"
             add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat spatial_r "${R_TSTAT}"
 
@@ -171,14 +203,22 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             # (p2dsetstat reads the degrees of freedom from the sub-brick header).
             THR1=$(${AFNI} "p2dsetstat -quiet -inset ${S1}'[${TSTAT}]' -pval ${PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
             THR2=$(${AFNI} "p2dsetstat -quiet -inset ${S2}'[${TSTAT}]' -pval ${PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
-            ACT1=${OUT}/act_${SES1}_${CON}.nii.gz
-            ACT2=${OUT}/act_${SES2}_${CON}.nii.gz
-            ${AFNI} "
-                3dcalc -overwrite -a ${S1}'[${TSTAT}]' -expr 'step(abs(a)-${THR1})' -prefix ${ACT1}
-                3dcalc -overwrite -a ${S2}'[${TSTAT}]' -expr 'step(abs(a)-${THR2})' -prefix ${ACT2}
-            "
-            DICE=$(${AFNI} "3ddot -dodice -mask ${MASK} ${ACT1} ${ACT2}" 2>/dev/null | tail -n1 | awk '{print $1}')
-            add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat dice "${DICE}"
+            if [ -z "${THR1}" ] || [ -z "${THR2}" ]; then
+                # Empty threshold would make 3dcalc's expr 'step(abs(a)-)' a syntax
+                # error. Record dice=NA and move on instead of crashing the task.
+                echo "  WARN: ${CON} -- empty p2dsetstat threshold (thr1='${THR1}' thr2='${THR2}'); recording dice=NA" >&2
+                DICE=NA
+                add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat dice NA
+            else
+                ACT1=${OUT}/act_${SES1}_${CON}.nii.gz
+                ACT2=${OUT}/act_${SES2}_${CON}.nii.gz
+                ${AFNI} "
+                    3dcalc -overwrite -a ${S1}'[${TSTAT}]' -expr 'step(abs(a)-${THR1})' -prefix ${ACT1}
+                    3dcalc -overwrite -a ${S2}'[${TSTAT}]' -expr 'step(abs(a)-${THR2})' -prefix ${ACT2}
+                "
+                DICE=$(afni_scalar "dice ${PARTICIPANT_ID}/${TASK}/${CON}" "3ddot -dodice -mask ${MASK} ${ACT1} ${ACT2}")
+                add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat dice "${DICE}"
+            fi
 
             # --- STEP D: scatter data (paired beta values within the mask) ---
             # Columns: i j k ses1 ses2  -> ready for a scatter/regression plot.
@@ -194,7 +234,12 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
     done
 done
 
-echo "Reproducibility comparison complete. Summary: ${SUMMARY}"
+if [ "${PROCESSED}" -eq 0 ]; then
+    echo "ERROR: no subject/task comparison ran (all skipped or failed). Not a successful run." >&2
+    exit 1
+fi
+
+echo "Reproducibility comparison complete (${PROCESSED} task-comparisons). Summary: ${SUMMARY}"
 
 # =============================================================================
 # ===== GROUP ROLL-UP: uncomment once >=2 two-session subjects are processed ===
