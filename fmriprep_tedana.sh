@@ -4,6 +4,14 @@
 # Submits two chained SLURM jobs per participant:
 #   Job 1 — fMRIPrep (preprocessing + per-echo output)
 #   Job 2 — Tedana ICA denoising + ANTs warp to MNI (runs only after Job 1 succeeds)
+#
+# SPACE TAG: the antsApplyTransforms/tedana output below is genuinely in
+# MNI152NLin2009cAsym, but it is written with NIfTI sform/qform_code 1
+# (SCANNER_ANAT) instead of 4 (MNI_152). The affine is correct -- only the integer
+# naming the space is downgraded -- so AFNI reads these files as space=ORIG/+orig.
+# This is NOT corrected here on purpose: 3drefit rewrites the file and would
+# downcast tedana's FLOAT64 to FLOAT32. first_level_afni.sh (STEP 1) restores the
+# tag on its own blurred copy instead, so nothing downstream sees ORIG.
 
 # ============================================================
 # CONFIGURATION — edit these before running

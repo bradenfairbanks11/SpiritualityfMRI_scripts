@@ -221,9 +221,9 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
 
     for TASK in "${TASKS[@]}"; do
 
-        # First-level REML buckets for the two sessions (AFNI +orig HEAD/BRIK).
-        S1=${AFNI_OUT}/${PARTICIPANT_ID}/${SES1}/task-${TASK}/${PARTICIPANT_ID}_${SES1}_task-${TASK}_stats_REML+orig
-        S2=${AFNI_OUT}/${PARTICIPANT_ID}/${SES2}/task-${TASK}/${PARTICIPANT_ID}_${SES2}_task-${TASK}_stats_REML+orig
+        # First-level REML buckets for the two sessions (AFNI +tlrc HEAD/BRIK).
+        S1=${AFNI_OUT}/${PARTICIPANT_ID}/${SES1}/task-${TASK}/${PARTICIPANT_ID}_${SES1}_task-${TASK}_stats_REML+tlrc
+        S2=${AFNI_OUT}/${PARTICIPANT_ID}/${SES2}/task-${TASK}/${PARTICIPANT_ID}_${SES2}_task-${TASK}_stats_REML+tlrc
 
         if [ ! -f "${S1}.HEAD" ] || [ ! -f "${S2}.HEAD" ]; then
             echo "skip: ${PARTICIPANT_ID} task-${TASK} -- missing a session's REML bucket (need both ${SES1} and ${SES2})"
@@ -244,7 +244,8 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
 
         # ------------------------------------------------------------------
         # STEP A: whole-brain mask = intersection of each session's automask.
-        # (3dDeconvolve ran without -mask, so the buckets hold values for every
+        # (3dDeconvolve now runs with -mask, so buckets are already zero outside
+        # the brain; this automask intersection stays as the reference mask for
         #  voxel; restricting to brain keeps the metrics meaningful.)
         # ------------------------------------------------------------------
         MASK=${OUT}/mask_both.nii.gz
@@ -399,8 +400,8 @@ for TASK in "${TASKS[@]}"; do
     for d in "${AFNI_OUT}"/sub-*; do
         [ -d "${d}" ] || continue
         sid=$(basename "${d}")
-        h1=${AFNI_OUT}/${sid}/${SES1}/task-${TASK}/${sid}_${SES1}_task-${TASK}_stats_REML+orig.HEAD
-        h2=${AFNI_OUT}/${sid}/${SES2}/task-${TASK}/${sid}_${SES2}_task-${TASK}_stats_REML+orig.HEAD
+        h1=${AFNI_OUT}/${sid}/${SES1}/task-${TASK}/${sid}_${SES1}_task-${TASK}_stats_REML+tlrc.HEAD
+        h2=${AFNI_OUT}/${sid}/${SES2}/task-${TASK}/${sid}_${SES2}_task-${TASK}_stats_REML+tlrc.HEAD
         { [ -f "${h1}" ] && [ -f "${h2}" ]; } && ICC_SUBS+=("${sid}")
     done
     n=${#ICC_SUBS[@]}
@@ -422,10 +423,10 @@ for TASK in "${TASKS[@]}"; do
         DT=""
         for sid in "${ICC_SUBS[@]}"; do
             for SES in "${SES1}" "${SES2}"; do
-                SB=${AFNI_OUT}/${sid}/${SES}/task-${TASK}/${sid}_${SES}_task-${TASK}_stats_REML+orig
+                SB=${AFNI_OUT}/${sid}/${SES}/task-${TASK}/${sid}_${SES}_task-${TASK}_stats_REML+tlrc
                 NI=${GROUP_OUT}/inputs/${sid}_${SES}_task-${TASK}_${CON}_Coef.nii.gz
                 rm -f "${NI}"
-                ${AFNI} "3dbucket -prefix ${NI} ${SB}'[${COEF}]'; 3drefit -space MNI152_2009 ${NI}"
+                ${AFNI} "3dbucket -prefix ${NI} ${SB}'[${COEF}]'; 3drefit -space MNI ${NI}"
                 seslab=${SES//-/}          # ses-1 -> ses1 (a valid factor level)
                 DT="${DT} ${sid} ${seslab} ${NI}"
             done

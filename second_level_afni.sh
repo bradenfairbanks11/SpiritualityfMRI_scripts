@@ -20,7 +20,7 @@
 #     mean_response = overall activation (sanity / localizer)
 #
 # This script:
-#   STEP 0  Discover which <sub>/<ses>/task-<TASK>_stats_REML+orig exist.
+#   STEP 0  Discover which <sub>/<ses>/task-<TASK>_stats_REML+tlrc exist.
 #   STEP 1  Extract slope + mean Coef/Tstat to NIfTI (MNI), and for subjects
 #           with >1 session, fixed-effects-average their sessions so each
 #           subject contributes ONE value per task.
@@ -34,9 +34,9 @@
 # picked up automatically. Re-run after sub-02/sub-04 (and more sessions)
 # finish and the group grows on its own.
 #
-# NOTE on space: the first-level BOLD was warped to MNI152NLin2009cAsym so all
-# subjects share a grid, but AFNI mislabels the datasets +orig. Extracting to
-# NIfTI writes the true MNI sform from the grid; 3drefit -space MNI152_2009
+# NOTE on space: the first-level BOLD is in MNI152NLin2009cAsym and, since
+# first_level_afni.sh restores the MNI tag that tedana drops, AFNI now reads the
+# buckets as space=MNI/view=+tlrc. Extracting to NIfTI keeps that sform; 3drefit -space MNI
 # then sets the label so clustering / whereami work.
 #
 # Run with:  sbatch second_level_afni.sh
@@ -117,9 +117,9 @@ echo "=============================================================="
 declare -A SESS
 SUBJECTS=()
 
-for HEAD in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_stats_REML+orig.HEAD; do
+for HEAD in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_stats_REML+tlrc.HEAD; do
     [ -e "${HEAD}" ] || continue
-    # .../sub-XX/ses-Y/task-TASK/sub-XX_ses-Y_task-TASK_stats_REML+orig.HEAD
+    # .../sub-XX/ses-Y/task-TASK/sub-XX_ses-Y_task-TASK_stats_REML+tlrc.HEAD
     task_dir=$(dirname "${HEAD}")
     ses_dir=$(dirname "${task_dir}")
     sub_dir=$(dirname "${ses_dir}")
@@ -137,7 +137,7 @@ done
 IFS=$'\n' SUBJECTS=($(sort <<<"${SUBJECTS[*]}")); unset IFS
 
 if [ "${#SUBJECTS[@]}" -eq 0 ]; then
-    echo "ERROR: no *_stats_REML+orig datasets found under ${AFNI_FIRSTLVL}"
+    echo "ERROR: no *_stats_REML+tlrc datasets found under ${AFNI_FIRSTLVL}"
     exit 1
 fi
 
@@ -151,7 +151,7 @@ done
 
 # Path to a first-level stats dataset for a given sub/ses/task.
 stats_dset() {  # <sub> <ses> <task>
-    echo "${AFNI_FIRSTLVL}/$1/$2/task-$3/$1_$2_task-$3_stats_REML+orig"
+    echo "${AFNI_FIRSTLVL}/$1/$2/task-$3/$1_$2_task-$3_stats_REML+tlrc"
 }
 
 # ==============================================================================
@@ -225,7 +225,7 @@ for SUB in "${SUBJECTS[@]}"; do
             fi
 
             # Label the space so clustering / whereami work (grid is truly MNI).
-            ${AFNI} "3drefit -space MNI152_2009 ${outC}; 3drefit -space MNI152_2009 ${outT}"
+            ${AFNI} "3drefit -space MNI ${outC}; 3drefit -space MNI ${outT}"
         done
     done
 done
@@ -264,7 +264,7 @@ else
     echo "  WARNING: no fMRIPrep brain masks found -> falling back to Coef coverage"
     ${AFNI} "3dmask_tool -input ${INPUTS}/*_slope_Coef.nii.gz -frac 1.0 -prefix ${GROUPMASK}"
 fi
-${AFNI} "3drefit -space MNI152_2009 ${GROUPMASK}"
+${AFNI} "3drefit -space MNI ${GROUPMASK}"
 
 echo "  grid consistency check (want 1s):"
 ${AFNI} "3dinfo -same_grid ${GROUPMASK} ${INPUTS}/*_slope_Coef.nii.gz" || true
@@ -424,7 +424,7 @@ echo "=============================================================="
 
 acf_file=${CLUSTDIR}/acf_params.txt
 : > "${acf_file}"
-for ERRTS in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_errts_REML+orig.HEAD; do
+for ERRTS in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_errts_REML+tlrc.HEAD; do
     [ -e "${ERRTS}" ] || continue
     dset=${ERRTS%.HEAD}
     line=$(${AFNI} "3dFWHMx -acf ${CLUSTDIR}/acf_est.1D -mask ${GROUPMASK} -input ${dset} 2>/dev/null" | tail -n1)

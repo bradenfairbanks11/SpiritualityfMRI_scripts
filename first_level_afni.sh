@@ -23,7 +23,12 @@
 #       rating[0] = mean response (overall activation)
 #       rating[1] = parametric SLOPE (BOLD vs rating) <-- result of interest
 #
-# Pipeline per run: smooth -> scale -> motion -> 3dDeconvolve -> 3dREMLfit
+# Pipeline per run: smooth -> scale/mask -> motion -> 3dDeconvolve -> 3dREMLfit
+#
+# Scaling and masking: signal is converted to percent of each voxel's own temporal
+# mean and capped at PSC_CAP (200, the AFNI default). The GLM is restricted to the
+# fMRIPrep brain mask, so 3dDeconvolve/3dREMLfit fit ~140k brain voxels instead of
+# the ~311k in the bounding box. Buckets are therefore zero outside the brain.
 #
 # Timing files (made by generate_timing_files.py, AM format "onset*rating"):
 #   ${TIMING_DIR}/byv-<BYV>_<ses>_task-<TASK>_ratingAM.1D
@@ -61,6 +66,12 @@ TR=1.388
 SMOOTH_FWHM=4.0
 MOTION_THRESH=1
 
+# --- Percent signal change ceiling applied in the scale step (STEP 2) ---
+# 200 is the AFNI default (afni_proc.py -scale_max_val). A value of 200 means
+# the voxel is 100% above its own temporal mean, which is far outside real BOLD
+# (~0.1-5%), so anything at/above it is edge, ventricle, or near-zero-mean junk.
+PSC_CAP=200
+
 # --- Tasks (BIDS labels: F=FHS, S=scripture, A=architecture per dcm2niix) ---
 TASKS=(scripture FHS architecture)
 
@@ -81,6 +92,12 @@ block_dur_for() {
 mkdir -p logs "${AFNI_OUT}"
 
 module load apptainer/1.3.6-qycanb2
+
+# AFNI refuses to overwrite existing output by default, and 'set -e' is active,
+# so a re-run over an existing derivatives tree would abort on the first 3dmerge.
+# Apptainer forwards APPTAINERENV_* into the container, so this reaches every
+# AFNI call below without adding -overwrite to each one.
+export APPTAINERENV_AFNI_DECONFLICT=OVERWRITE
 
 AFNI="apptainer exec --bind ${BIND}:${BIND} ${AFNI_SIF} bash -c"
 
@@ -144,6 +161,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             BOLD_IN=${TEDANA_FUNC}/${PARTICIPANT_ID}_${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
             CONFOUNDS=${FMRIPREP_OUT}/${PARTICIPANT_ID}/${SES}/func/${PARTICIPANT_ID}_${SES}_task-${TASK}_desc-confounds_timeseries.tsv
             TIMING=${TIMING_DIR}/byv-${BYV}_${SES}_task-${TASK}_ratingAM.1D
+            MASK=${FMRIPREP_OUT}/${PARTICIPANT_ID}/${SES}/func/${PARTICIPANT_ID}_${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz
 
             if [ ! -f "${BOLD_IN}" ]; then
                 echo "Skipping ${PARTICIPANT_ID} ${SES} task-${TASK}: BOLD not found"
@@ -151,6 +169,10 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             fi
             if [ ! -f "${TIMING}" ]; then
                 echo "Skipping ${PARTICIPANT_ID} ${SES} task-${TASK}: no timing file (dead/absent run) ${TIMING}"
+                continue
+            fi
+            if [ ! -f "${MASK}" ]; then
+                echo "Skipping ${PARTICIPANT_ID} ${SES} task-${TASK}: no fMRIPrep brain mask ${MASK}"
                 continue
             fi
 
@@ -162,7 +184,20 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             echo "=== ${PARTICIPANT_ID} ${SES} task-${TASK} (byv-${BYV}, BLOCK ${BLOCK_DUR}s) ==="
 
             # ------------------------------------------------------------------
-            # STEP 1: Spatial smoothing (4mm FWHM)
+            # STEP 1: Spatial smoothing (4mm FWHM), then restore the MNI space tag.
+            #
+            # The data IS in MNI152NLin2009cAsym, but tedana rewrites fMRIPrep's
+            # output with sform/qform_code 1 (SCANNER_ANAT) instead of 4 (MNI_152).
+            # The affine is preserved exactly -- only the integer naming the space is
+            # downgraded -- so AFNI reads the BOLD as space=ORIG/view=+orig while every
+            # fMRIPrep file says MNI/+tlrc. Left alone that mislabel propagates to every
+            # first-level bucket and blocks MNI atlas lookups (whereami, cluster tables).
+            #
+            # The tag is restored here, on our own blurred copy, rather than on the
+            # tedana derivative: 3drefit rewrites the file and would silently downcast
+            # tedana's FLOAT64 to FLOAT32. That costs nothing analytically (AFNI already
+            # converts to FLOAT32 on read) but it would alter an archived BIDS
+            # derivative, so the tedana outputs are left exactly as tedana wrote them.
             # ------------------------------------------------------------------
             ${AFNI} "
                 3dmerge \
@@ -170,10 +205,24 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                     -doall \
                     -prefix ${OUT_DIR}/${PREFIX}_blurred.nii.gz \
                     ${BOLD_IN}
+
+                3drefit -space MNI ${OUT_DIR}/${PREFIX}_blurred.nii.gz
             "
 
             # ------------------------------------------------------------------
-            # STEP 2: Scale to percent signal change (cap at 10000 for now)
+            # STEP 2: Scale to percent signal change, capped at ${PSC_CAP} (AFNI default 200)
+            #
+            # a = blurred timeseries, b = its temporal mean, c = fMRIPrep brain mask.
+            #   a/b*100  -> mean becomes 100, so values read as percent of the mean
+            #   min(cap) -> clips non-physiological voxels (see PSC_CAP above)
+            #   step(a)*step(b) -> zeros voxels where the timepoint or mean is <= 0
+            #   c        -> zeros everything outside the brain, so the GLM below
+            #               never wastes time fitting non-brain voxels
+            # Blur-then-mask matches the afni_proc.py order (blur -> mask -> scale).
+            #
+            # The fMRIPrep mask is used directly: after the STEP 1 refit both it and
+            # the blurred data are space=MNI on an identical grid
+            # (3dinfo -same_all_grid = all 1), so no copy or resampling is needed.
             # ------------------------------------------------------------------
             ${AFNI} "
                 3dTstat \
@@ -184,7 +233,8 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 3dcalc \
                     -a ${OUT_DIR}/${PREFIX}_blurred.nii.gz \
                     -b ${OUT_DIR}/${PREFIX}_blurred_mean.nii.gz \
-                    -expr 'min(10000, a/b*100)*step(a)*step(b)' \
+                    -c ${MASK} \
+                    -expr 'c*min(${PSC_CAP}, a/b*100)*step(a)*step(b)' \
                     -prefix ${OUT_DIR}/${PREFIX}_blurred_scaled.nii.gz
             "
 
@@ -241,6 +291,7 @@ with open('${CONFOUNDS}') as f:
 
                 3dDeconvolve \
                     -input ${OUT_DIR}/${PREFIX}_blurred_scaled.nii.gz \
+                    -mask ${MASK} \
                     -polort A \
                     -TR_times ${TR} \
                     -censor ${OUT_DIR}/${PREFIX}_motion_censor.1D \
@@ -271,6 +322,7 @@ with open('${CONFOUNDS}') as f:
                 3dREMLfit \
                     -matrix ${OUT_DIR}/${PREFIX}_xmat.1D \
                     -input  ${OUT_DIR}/${PREFIX}_blurred_scaled.nii.gz \
+                    -mask   ${MASK} \
                     -fout -tout \
                     -Rbuck  ${OUT_DIR}/${PREFIX}_stats_REML \
                     -Rvar   ${OUT_DIR}/${PREFIX}_REMLvar \
