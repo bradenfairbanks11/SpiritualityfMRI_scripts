@@ -46,6 +46,10 @@
 # double-dipping; robust contrast only -> not gated on the noisy rating_slope),
 # AND within the whole-brain mask as a reference. The summary TSV carries a `mask`
 # column (activation | wholebrain) to distinguish them.
+#   A third, DISABLED option -- a leave-one-subject-out ROI (mask=activation_loo)
+#   -- lives in STEP A3 below. It removes the residual circularity of building the
+#   ROI from a group map that includes the subject being measured. Only worth
+#   enabling once the sample is large; see the notes on that block.
 #
 # Contrasts compared (sub-brick labels in the REML bucket):
 #   mean_response  -> mean_response#0_Coef , mean_response#0_Tstat  (task activation)
@@ -285,6 +289,93 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             fi
         fi
 
+        # ------------------------------------------------------------------
+        # STEP A3 (DISABLED) — LEAVE-ONE-SUBJECT-OUT activation ROI
+        #
+        # WHY: the STEP A2 ROI comes from a group MEMA that INCLUDES this subject,
+        # so ~1/n of the evidence selecting the voxels IS the subject being
+        # measured. That is a weak form of double dipping. STEP 1 of
+        # second_level_afni.sh averages the two sessions before MEMA, so the ROI is
+        # blind to the ses1-vs-ses2 DIFFERENCE -- but it still sees their SUM, and
+        # selecting on a large |b1+b2| preferentially keeps voxels where the two
+        # sessions happened to be large together, nudging spatial_r / spatial_icc
+        # upward. LOO removes the dependence: sub-X's ROI is built from everyone
+        # EXCEPT sub-X, so selection noise and measurement noise are independent.
+        #
+        # COST: the LOO MEMA has n-1 subjects, so dof drops and the threshold rises
+        # (at n=4: t(2)=4.303 vs t(3)=3.182). Each subject also gets a DIFFERENT
+        # ROI, so activation_loo values are not strictly comparable across subjects
+        # -- keep the shared-ROI `activation` rows as the comparable set and read
+        # the LOO rows as the bias-free companion.
+        #
+        # DO NOT ENABLE BELOW ~8-10 SUBJECTS. At small n the LOO ROI is so unstable
+        # that you trade a known bias for unknown noise. LOO_MIN_N enforces this.
+        #
+        # PREREQUISITES before uncommenting:
+        #   1. second_level_afni.sh must persist its per-subject session-averaged
+        #      inputs (they currently exist only in autodelete scratch, which is
+        #      purged). In its STEP 7 change
+        #          for d in mask mema ttest clustsim; do
+        #      to
+        #          for d in mask mema ttest clustsim inputs; do
+        #      and re-run it.
+        #   2. 3dMEMA needs R packages data.table + snow. The bootstrap at the top
+        #      of THIS script installs snow but not data.table -- either add
+        #      "data.table" to ICC_PKGS, or rely on second_level_afni.sh having
+        #      already installed it into the shared RLIB.
+        #   3. rm -rf ${REPRO_OUT}/loo_mema whenever the subject set changes: the
+        #      LOO maps are cached per (task, excluded subject) and go stale.
+        # ------------------------------------------------------------------
+        # LOO_MIN_N=8                                   # min OTHER subjects required
+        # LOO_INPUTS=${PROJECT}/derivatives/afni_group/inputs
+        # LOO_GROUPMASK=${PROJECT}/derivatives/afni_group/mask/group_mask.nii.gz
+        # LOO_MEMA_DIR=${REPRO_OUT}/loo_mema
+        # ACTMASK_LOO=${OUT}/mask_activation_loo.nii.gz
+        # rm -f "${ACTMASK_LOO}"
+        # mkdir -p "${LOO_MEMA_DIR}"
+        #
+        # if [ ! -d "${LOO_INPUTS}" ]; then
+        #     echo "  WARN: LOO ROI -- ${LOO_INPUTS} not found (see prerequisite 1); skipping" >&2
+        # else
+        #     # Build the -set list from every OTHER subject with a session-averaged mean map.
+        #     LOO_SET=""; NLOO=0
+        #     for c in "${LOO_INPUTS}"/sub-*_task-${TASK}_mean_Coef.nii.gz; do
+        #         [ -e "${c}" ] || continue
+        #         s=$(basename "${c}"); s=${s%%_task-*}
+        #         [ "${s}" = "${PARTICIPANT_ID}" ] && continue        # <-- leave this subject out
+        #         t=${LOO_INPUTS}/${s}_task-${TASK}_mean_T.nii.gz
+        #         [ -f "${t}" ] || continue
+        #         LOO_SET="${LOO_SET} ${s} ${c} ${t}"
+        #         NLOO=$((NLOO + 1))
+        #     done
+        #
+        #     if [ "${NLOO}" -lt "${LOO_MIN_N}" ]; then
+        #         echo "  LOO ROI ${PARTICIPANT_ID}/${TASK}: only ${NLOO} other subject(s), need >=${LOO_MIN_N} -- skipping" >&2
+        #     else
+        #         LOO_MEMA=${LOO_MEMA_DIR}/mema_${TASK}_mean_without-${PARTICIPANT_ID}
+        #         if [ ! -f "${LOO_MEMA}+tlrc.HEAD" ]; then
+        #             echo "  LOO MEMA ${TASK} excluding ${PARTICIPANT_ID} (n=${NLOO})"
+        #             ${AFNI_R} "3dMEMA -prefix ${LOO_MEMA} -mask ${LOO_GROUPMASK} \
+        #                 -missing_data 0 -set ${TASK}_mean ${LOO_SET}"
+        #         fi
+        #         if [ -f "${LOO_MEMA}+tlrc.HEAD" ]; then
+        #             # Same threshold -> binarize -> NN-resample -> intersect as STEP A2.
+        #             LTHR=$(${AFNI} "p2dsetstat -quiet -inset ${LOO_MEMA}'[1]' -pval ${ACT_PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
+        #             if [ -n "${LTHR}" ]; then
+        #                 ${AFNI} "
+        #                     3dcalc -overwrite -a ${LOO_MEMA}'[1]' -expr 'step(abs(a)-${LTHR})' -prefix ${OUT}/.loo_thr.nii.gz
+        #                     3dresample -overwrite -master ${MASK} -rmode NN -prefix ${OUT}/.loo_thr_rs.nii.gz -input ${OUT}/.loo_thr.nii.gz
+        #                     3dmask_tool -overwrite -input ${MASK} ${OUT}/.loo_thr_rs.nii.gz -inter -prefix ${ACTMASK_LOO}
+        #                 "
+        #             else
+        #                 echo "  WARN: LOO ROI ${PARTICIPANT_ID}/${TASK} -- empty p2dsetstat threshold" >&2
+        #             fi
+        #         else
+        #             echo "  WARN: LOO MEMA failed for ${PARTICIPANT_ID}/${TASK} (R packages? see prerequisite 2)" >&2
+        #         fi
+        #     fi
+        # fi
+
         # Build the mask list: activation (if a non-empty ROI was built) + wholebrain.
         MASKS=()
         NACT=""
@@ -296,6 +387,14 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         else
             echo "  WARN: ${TASK} -- no group activation ROI (mema_${TASK}_mean missing/empty); activation metrics -> whole-brain only" >&2
         fi
+        # --- LOO ROI (STEP A3): uncomment together with the STEP A3 block above ---
+        # NACT_LOO=""
+        # if [ -f "${ACTMASK_LOO}" ]; then
+        #     NACT_LOO=$(${AFNI} "3dBrickStat -non-zero -count ${ACTMASK_LOO}" 2>/dev/null | tail -n1 | awk '{print $1}')
+        # fi
+        # if [ -n "${NACT_LOO}" ] && [ "${NACT_LOO}" -gt 0 ] 2>/dev/null; then
+        #     MASKS+=("activation_loo:${ACTMASK_LOO}")
+        # fi
         MASKS+=("wholebrain:${MASK}")
 
         # ------------------------------------------------------------------
