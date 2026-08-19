@@ -14,18 +14,15 @@
 # tag on its own blurred copy instead, so nothing downstream sees ORIG.
 
 # ============================================================
-# CONFIGURATION — edit these before running
+# CONFIGURATION — all paths come from config.sh, edit there
+# ============================================================
+# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# Provides: BIDS_DIR FMRIPREP_OUT TEDANA_OUT BIDS_FILTER_DIR WORK_ROOT LOGS
+#           FMRIPREP_SIF TEMPLATEFLOW_HOME FS_LICENSE CONDA_ENV BIND_ARGS
 # ============================================================
 
-BIDS_DIR=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/BIDS
-FMRIPREP_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/fmriprep
-TEDANA_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/tedana
-
-CONDA_ENV=tedenv
-
-# ============================================================
-
-mkdir -p logs
+mkdir -p "${LOGS}"
 
 # Participants to process. Pass labels as args (e.g. "sub-04 sub-05" or "04 05");
 # with NO args, falls back to ALL sub-* in BIDS (the original behavior).
@@ -76,7 +73,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         fi
         GUARD_SES_GLOB="ses-${SES_LABEL}"
         WORK_SUBDIR="${PARTICIPANT_ID}_ses-${SES_LABEL}"
-        FILTER_FILE=${FMRIPREP_OUT}/../bids_filters/${PARTICIPANT_ID}_ses-${SES_LABEL}_filter.json
+        FILTER_FILE=${BIDS_FILTER_DIR}/${PARTICIPANT_ID}_ses-${SES_LABEL}_filter.json
         mkdir -p "$(dirname "${FILTER_FILE}")"
         cat > "${FILTER_FILE}" <<JSON
 {
@@ -132,8 +129,9 @@ JSON
     FMRIPREP_JOB=$(sbatch --parsable <<EOT
 #!/bin/bash
 #SBATCH --job-name=${PARTICIPANT_ID}_fmriprep
-#SBATCH --output=logs/${PARTICIPANT_ID}_fmriprep.out
-#SBATCH --error=logs/${PARTICIPANT_ID}_fmriprep.err
+#SBATCH --output=${LOGS}/${PARTICIPANT_ID}_fmriprep.out
+#SBATCH --error=${LOGS}/${PARTICIPANT_ID}_fmriprep.err
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
@@ -145,19 +143,19 @@ set -euo pipefail
 
 module load apptainer/1.3.6-qycanb2
 
-export TEMPLATEFLOW_HOME=/nobackup/archive/usr/bradenf4/software/templateflow
+export TEMPLATEFLOW_HOME=${TEMPLATEFLOW_HOME}
 
 apptainer run --cleanenv \
-    --env TEMPLATEFLOW_HOME=/nobackup/archive/usr/bradenf4/software/templateflow \
-    --bind /nobackup/archive/usr/bradenf4:/nobackup/archive/usr/bradenf4,/nobackup/autodelete/usr/bradenf4:/nobackup/autodelete/usr/bradenf4,/nobackup/archive/usr/bradenf4/software/templateflow:/nobackup/archive/usr/bradenf4/software/templateflow \
-    /nobackup/archive/usr/bradenf4/software/fmri_prep/my_images/fmriprep-25.1.4.sif \
+    --env TEMPLATEFLOW_HOME=${TEMPLATEFLOW_HOME} \
+    ${BIND_ARGS} \
+    ${FMRIPREP_SIF} \
     ${BIDS_DIR} \
     ${FMRIPREP_OUT} \
     participant \
     --participant-label ${PARTICIPANT_LABEL} \
     ${BIDS_FILTER_ARG} \
-    --fs-license-file /nobackup/archive/usr/bradenf4/software/fmri_prep/preprocessing/license.txt \
-    --work-dir /nobackup/autodelete/usr/bradenf4/${WORK_SUBDIR} \
+    --fs-license-file ${FS_LICENSE} \
+    --work-dir ${WORK_ROOT}/${WORK_SUBDIR} \
     --nthreads 8 \
     --mem 64G \
     --me-output-echos \
@@ -176,8 +174,9 @@ EOT
     sbatch --dependency=afterok:${FMRIPREP_JOB} <<EOT
 #!/bin/bash
 #SBATCH --job-name=${PARTICIPANT_ID}_tedana
-#SBATCH --output=logs/${PARTICIPANT_ID}_tedana.out
-#SBATCH --error=logs/${PARTICIPANT_ID}_tedana.err
+#SBATCH --output=${LOGS}/${PARTICIPANT_ID}_tedana.out
+#SBATCH --error=${LOGS}/${PARTICIPANT_ID}_tedana.err
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

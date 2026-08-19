@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # Define home directory
-home_dir=~/nobackup/archive/Nielsen_active/Spirituality/Project/rawdata
-bids_dir=~/nobackup/archive/Nielsen_active/Spirituality/Project/BIDS
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+home_dir=${RAWDATA_DIR}
+bids_dir=${BIDS_DIR}
 
 # Directory this script lives in (so we can call assign_fieldmaps.py alongside it)
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

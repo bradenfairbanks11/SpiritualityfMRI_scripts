@@ -19,16 +19,14 @@
 # tag on its own blurred copy instead, so nothing downstream sees ORIG.
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION — all paths come from config.sh, edit there
 # ============================================================
-BIDS_DIR=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/BIDS
-FMRIPREP_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/fmriprep
-TEDANA_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/tedana
-
-CONDA_ENV=tedenv
+# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# Provides: BIDS_DIR FMRIPREP_OUT TEDANA_OUT LOGS CONDA_ENV
 # ============================================================
 
-mkdir -p logs
+mkdir -p "${LOGS}"
 
 if [ "$#" -eq 0 ]; then
     echo "ERROR: pass participant labels, e.g. 'bash tedana_only.sh sub-04 sub-05'"
@@ -48,8 +46,9 @@ for arg in "$@"; do
     sbatch <<EOT
 #!/bin/bash
 #SBATCH --job-name=${PARTICIPANT_ID}_tedana
-#SBATCH --output=logs/${PARTICIPANT_ID}_tedana.out
-#SBATCH --error=logs/${PARTICIPANT_ID}_tedana.err
+#SBATCH --output=${LOGS}/${PARTICIPANT_ID}_tedana.out
+#SBATCH --error=${LOGS}/${PARTICIPANT_ID}_tedana.err
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G

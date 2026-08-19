@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=spirituality_grouplvl
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=/home/bradenf4/spirituality_fmri/logs/%x_%j.out
+#SBATCH --error=/home/bradenf4/spirituality_fmri/logs/%x_%j.err
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -48,23 +49,24 @@ set -e
 # CONFIGURATION
 # ==============================================================================
 
-PROJECT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project
-AFNI_FIRSTLVL=${PROJECT}/derivatives/afni_firstlvl
-FMRIPREP_OUT=${PROJECT}/derivatives/fmriprep
+# --- All paths come from config.sh; edit there, not here ---
+# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# Provides: DERIV AFNI_OUT FMRIPREP_OUT GROUP_OUT FINAL_DIR RLIB AFNI_SIF
+#           LOGS BIND_ARGS
+AFNI_FIRSTLVL=${AFNI_OUT}
 
-# Compute in fast autodelete scratch (archive is slow / discouraged for compute),
-# then persist the small final maps back to archive at the end (STEP 7).
-ARCHIVE_ROOT=/nobackup/archive/usr/bradenf4
-AUTODELETE_ROOT=/nobackup/autodelete/usr/bradenf4
-GROUP_OUT=${AUTODELETE_ROOT}/spirituality_group      # working dir (fast scratch)
-GROUP_FINAL=${PROJECT}/derivatives/afni_group        # permanent home (archive)
+# Everything computes on SCRATCH; the small final maps are persisted to ARCHIVE in
+# STEP 7. This is what BYU RC asks for — "Archive storage should generally NOT be
+# used directly from batch jobs." STEP 7 complements promote_to_archive.sh, which
+# does the same job for the first-level buckets.
+GROUP_FINAL=${FINAL_DIR}/afni_group
 
 # 3dMEMA is an R program; the AFNI container's R (3.4.4) lacks its packages
-# (data.table, snow). We install them once into this persistent library on
-# archive and expose it to the container via R_LIBS_USER (see bootstrap below).
-RLIB=${GROUP_FINAL}/Rlib
-
-AFNI_SIF=/apps/afni/afni_make_build_latest.sif
+# (data.table, snow). RLIB now lives on /home (see config.sh), NOT on scratch or in
+# the group output tree: compute nodes have NO internet, so if the library is ever
+# purged it cannot be reinstalled from inside a job — it has to be redone from a
+# login node. /home is backed up and never purged.
 
 # --- Tasks ---
 TASKS=(scripture FHS architecture)
@@ -90,7 +92,7 @@ module load apptainer/1.3.6-qycanb2
 mkdir -p "${RLIB}"
 # Bind both archive (source data) and autodelete (fast scratch) into the
 # container, and expose the persistent R library so 3dMEMA finds its packages.
-AFNI="apptainer exec --bind ${ARCHIVE_ROOT}:${ARCHIVE_ROOT} --bind ${AUTODELETE_ROOT}:${AUTODELETE_ROOT} --env R_LIBS_USER=${RLIB} ${AFNI_SIF} bash -c"
+AFNI="apptainer exec ${BIND_ARGS} --env R_LIBS_USER=${RLIB} ${AFNI_SIF} bash -c"
 
 # --- Bootstrap: install 3dMEMA's R packages into RLIB on first run ---
 if ! ${AFNI} "Rscript -e 'q(status=length(setdiff(c(\"data.table\",\"snow\"), rownames(installed.packages()))))'"; then
@@ -98,7 +100,7 @@ if ! ${AFNI} "Rscript -e 'q(status=length(setdiff(c(\"data.table\",\"snow\"), ro
     ${AFNI} "Rscript -e 'options(repos=c(CRAN=\"https://cloud.r-project.org\")); install.packages(c(\"snow\",\"data.table\"), lib=Sys.getenv(\"R_LIBS_USER\"))'"
 fi
 
-mkdir -p logs "${GROUP_OUT}"/{inputs,mask,mema,ttest,clustsim}
+mkdir -p "${LOGS}" "${GROUP_OUT}"/{inputs,mask,mema,ttest,clustsim}
 INPUTS=${GROUP_OUT}/inputs
 MASKDIR=${GROUP_OUT}/mask
 MEMADIR=${GROUP_OUT}/mema

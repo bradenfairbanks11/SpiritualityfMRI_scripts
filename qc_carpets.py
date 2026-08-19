@@ -28,7 +28,15 @@ from matplotlib.gridspec import GridSpec
 
 warnings.filterwarnings("ignore")
 
-DERIV = "/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives"
+# Paths come from config.sh so this stays in step with the shell pipeline.
+# Override with the DERIV env var if you need to point somewhere else:
+#     DERIV=/some/other/derivatives python qc_carpets.py
+# Default matches config.sh: all compute output lives on SCRATCH, never archive.
+# BYU HPC agent/operating instructions: see ./BYU_ORC_AGENTS.md in this repo.
+DERIV = os.environ.get(
+    "DERIV",
+    "/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives",
+)
 FMRIPREP = f"{DERIV}/fmriprep"
 TEDANA = f"{DERIV}/tedana"
 OUTDIR = f"{DERIV}/tedana/qc_carpets"

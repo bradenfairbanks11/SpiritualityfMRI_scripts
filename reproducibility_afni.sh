@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=spirituality_repro
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=/home/bradenf4/spirituality_fmri/logs/%x_%j.out
+#SBATCH --error=/home/bradenf4/spirituality_fmri/logs/%x_%j.err
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -73,24 +74,20 @@ set -o pipefail
 # CONFIGURATION
 # ==============================================================================
 
-# --- Paths (match first_level_afni.sh / second_level_afni.sh) ---
-PROJECT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project
-TEDANA_OUT=${PROJECT}/derivatives/tedana
-AFNI_OUT=${PROJECT}/derivatives/afni_firstlvl
-AFNI_SIF=/apps/afni/afni_make_build_latest.sif
-BIND=/nobackup/archive/usr/bradenf4
-
-# --- New output root for reproducibility results ---
-REPRO_OUT=${PROJECT}/derivatives/afni_reproducibility
+# --- All paths come from config.sh; edit there, not here ---
+# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# Provides: TEDANA_OUT AFNI_OUT REPRO_OUT GROUP_OUT RLIB AFNI_SIF LOGS BIND_ARGS
 
 # --- Group-level mean_response activation map (from second_level_afni.sh STEP 3).
 #     3dMEMA one-sample output: [0]=effect, [1]=stat. Used to build the functional
 #     ROI mask. If absent, the script falls back to whole-brain only. ---
-GROUP_MEMA=${PROJECT}/derivatives/afni_group/mema
+GROUP_MEMA=${GROUP_OUT}/mema
 
-# --- Persistent R library shared with second_level_afni.sh (container R lacks the
-#     packages; installed once into archive and exposed via R_LIBS_USER). ---
-RLIB=${PROJECT}/derivatives/afni_group/Rlib
+# NOTE: RLIB now lives on /home (see config.sh), not in the group output tree.
+# Compute nodes have NO internet — that is why the original bootstrap install of
+# `irr` failed from inside a job and had to be redone from a login node. Keeping the
+# library on a backed-up, never-purged filesystem means that cannot recur.
 
 # --- Tasks (same labels as first_level_afni.sh) ---
 TASKS=(scripture FHS architecture)
@@ -114,15 +111,15 @@ SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 # ==============================================================================
 
-mkdir -p logs "${REPRO_OUT}" "${RLIB}"
+mkdir -p "${LOGS}" "${REPRO_OUT}" "${RLIB}"
 
 module load apptainer/1.3.6-qycanb2
 
 # AFNI_DECONFLICT=OVERWRITE so re-runs overwrite intermediate files cleanly.
-AFNI="apptainer exec --env AFNI_DECONFLICT=OVERWRITE --bind ${BIND}:${BIND} ${AFNI_SIF} bash -c"
+AFNI="apptainer exec --env AFNI_DECONFLICT=OVERWRITE ${BIND_ARGS} ${AFNI_SIF} bash -c"
 # R-enabled invocation for the ICC steps (irr for spatial ICC, 3dICC for the group
 # map). Exposes the persistent R library so those R programs find their packages.
-AFNI_R="apptainer exec --env AFNI_DECONFLICT=OVERWRITE --env R_LIBS_USER=${RLIB} --bind ${BIND}:${BIND} ${AFNI_SIF} bash -c"
+AFNI_R="apptainer exec --env AFNI_DECONFLICT=OVERWRITE --env R_LIBS_USER=${RLIB} ${BIND_ARGS} ${AFNI_SIF} bash -c"
 
 # --- Bootstrap: install the ICC R packages into RLIB on first run ---
 #   spatial ICC (irr) + 3dICC (blme, lme4, metafor, snow).

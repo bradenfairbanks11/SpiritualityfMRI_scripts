@@ -1,7 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=spirituality_firstlvl
-#SBATCH --output=logs/%x_%j.out
-#SBATCH --error=logs/%x_%j.err
+#SBATCH --output=/home/bradenf4/spirituality_fmri/logs/%x_%j.out
+#SBATCH --error=/home/bradenf4/spirituality_fmri/logs/%x_%j.err
+#SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
@@ -48,18 +49,17 @@ set -e
 # CONFIGURATION
 # ==============================================================================
 
-# --- Paths already known from the preprocessing pipeline ---
-BIDS_DIR=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/BIDS
-RAWDATA_DIR=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/rawdata
-FMRIPREP_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/fmriprep
-TEDANA_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/tedana
-
-# --- Paths still needed ---
-AFNI_OUT=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/afni_firstlvl                       
-TIMING_DIR=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/derivatives/afni_firstlvl/timing                   
-AFNI_SIF=/apps/afni/afni_make_build_latest.sif  
-PARTICIPANTS_TSV=${RAWDATA_DIR}/participants.tsv  
-BIND=/nobackup/archive/usr/bradenf4      
+# --- All paths come from config.sh; edit there, not here ---
+# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# Provides: BIDS_DIR RAWDATA_DIR FMRIPREP_OUT TEDANA_OUT AFNI_OUT TIMING_DIR
+#           PARTICIPANTS_TSV AFNI_SIF LOGS BIND_ARGS
+#
+# NOTE ON TIMING_DIR: it is now ~/spirituality_fmri/timing, NOT nested inside
+# AFNI_OUT as before. The *_ratingAM.1D files are made off-cluster and cannot be
+# regenerated here, so they must not sit on the 12-week-purge scratch tier. This
+# also removes the old trap where renaming the first-level tree silently made every
+# run skip for "no timing file".
 
 # --- Acquisition parameters (known) ---
 TR=1.388
@@ -99,7 +99,7 @@ module load apptainer/1.3.6-qycanb2
 # AFNI call below without adding -overwrite to each one.
 export APPTAINERENV_AFNI_DECONFLICT=OVERWRITE
 
-AFNI="apptainer exec --bind ${BIND}:${BIND} ${AFNI_SIF} bash -c"
+AFNI="apptainer exec ${BIND_ARGS} ${AFNI_SIF} bash -c"
 
 if [ ! -f "${PARTICIPANTS_TSV}" ]; then
     echo "ERROR: participants.tsv not found at ${PARTICIPANTS_TSV}"
