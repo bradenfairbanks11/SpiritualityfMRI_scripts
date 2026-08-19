@@ -101,7 +101,7 @@ copy_component "SOFTWARE: TemplateFlow"  "${ARCHIVE_ROOT}/software/templateflow"
                                          "${HOME_ROOT}/software/templateflow"
 
 banner "SOFTWARE: fMRIPrep container"
-SIF_SRC=${ARCHIVE_ROOT}/software/fmri_prep/fmriprep-25.1.4.sif
+SIF_SRC=${ARCHIVE_ROOT}/software/fmri_prep/my_images/fmriprep-25.1.4.sif
 SIF_DST=${HOME_ROOT}/software/fmriprep-25.1.4.sif
 echo "src: ${SIF_SRC}  ($(du -sh "${SIF_SRC}" 2>/dev/null | cut -f1))"
 echo "dst: ${SIF_DST}"
