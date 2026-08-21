@@ -170,6 +170,54 @@ prune() {
     return 0
 }
 
+# Variant of prune() for a source that was MERGED into its destination rather than
+# copied verbatim. Layer 3 in prune() asks "is the copy byte-identical right now?",
+# which archive's TemplateFlow can never satisfy: ~/software/templateflow is the
+# union of it and the newer ms-mri tree, and the newer files won. The correct
+# question is the same one verify_migration.sh now asks — does every source path
+# still EXIST at the destination? If so, deleting the source loses nothing.
+prune_covered() {
+    local label="$1" victim="$2" proof_label="$3" proof_copy="$4"
+    banner "${label}"
+
+    if [ ! -e "${victim}" ]; then
+        echo "SKIP — already gone: ${victim}"
+        return 0
+    fi
+    echo "delete : ${victim}"
+    echo "size   : $(du -sh "${victim}" 2>/dev/null | cut -f1)"
+    echo "proof  : ${proof_label}"
+    echo "copy at: ${proof_copy}"
+
+    if ! grep -qF "PASS|${proof_label}" "${STAMP}"; then
+        echo "SKIP — '${proof_label}' is not marked PASS in the stamp. Not deleting."
+        SKIPPED=$((SKIPPED + 1)); return 1
+    fi
+    if [ ! -e "${proof_copy}" ]; then
+        echo "SKIP — the surviving copy has VANISHED from ${proof_copy}."
+        SKIPPED=$((SKIPPED + 1)); return 1
+    fi
+
+    local n
+    n=$(rsync -a --dry-run --itemize-changes --size-only "${victim}/" "${proof_copy}/" 2>/dev/null \
+        | awk '/^>f\+\+\+\+\+\+\+\+\+/' | grep -c .)
+    if [ "${n}" -ne 0 ]; then
+        echo "SKIP — ${n} path(s) exist here but NOT at ${proof_copy}. Not deleting."
+        SKIPPED=$((SKIPPED + 1)); return 1
+    fi
+    echo "recheck: OK — every path here also exists at the destination as of right now."
+
+    if [ "${DRYRUN}" = "1" ]; then
+        echo "[dry run] would delete ${victim}"
+    else
+        echo "DELETING ${victim} ..."
+        rm -rf "${victim}" || { echo "ERROR: rm failed"; SKIPPED=$((SKIPPED + 1)); return 1; }
+        echo "deleted."
+    fi
+    DELETED=$((DELETED + 1))
+    return 0
+}
+
 # --- Spirituality --------------------------------------------------------------
 prune "SPIRITUALITY: BIDS (regenerable from rawdata)" \
       "${SPIR_ARCHIVE}/BIDS" "SPIRITUALITY: BIDS" "${SPIR_SCRATCH}/BIDS"
@@ -224,20 +272,76 @@ else
 fi
 
 if [ "${PRUNE_SOFTWARE}" = "1" ]; then
-    banner "EXTRA: archive software/"
-    echo "delete: ${ARCHIVE_ROOT}/software  ($(du -sh "${ARCHIVE_ROOT}/software" 2>/dev/null | cut -f1))"
-    if ! grep -qF "PASS|SOFTWARE: fMRIPrep container" "${STAMP}" \
-       || ! grep -qF "PASS|SOFTWARE: TemplateFlow (from archive)" "${STAMP}"; then
-        echo "SKIP — software components are not both PASS in the stamp."
+    # Deliberately NOT a blanket rm -rf of software/. Two subtrees go, two stay:
+    #   templateflow/       GOES — superseded by ~/software/templateflow
+    #   fmri_prep/          GOES — abandoned Aug-2025 coursework tree
+    #   matlab-r2025a.sif   STAYS — 2.3 GB and it exists nowhere else on any tier
+    #   dcm2niix/           STAYS — 34 MB, harmless, mirrored at ~/software/dcm2niix
+
+    prune_covered "EXTRA: archive software/templateflow (superseded by ~/software/templateflow)" \
+                  "${ARCHIVE_ROOT}/software/templateflow" \
+                  "SOFTWARE: TemplateFlow (archive superseded)" \
+                  "${HOME_ROOT}/software/templateflow"
+
+    banner "EXTRA: archive software/fmri_prep"
+    FP=${ARCHIVE_ROOT}/software/fmri_prep
+    if [ ! -e "${FP}" ]; then
+        echo "SKIP — already gone: ${FP}"
+    elif ! grep -qF "PASS|SOFTWARE: fMRIPrep container" "${STAMP}"; then
+        echo "SKIP — 'SOFTWARE: fMRIPrep container' is not marked PASS in the stamp."
         SKIPPED=$((SKIPPED + 1))
-    elif [ "${DRYRUN}" = "1" ]; then
-        echo "[dry run] would delete archive software/"
     else
-        rm -rf "${ARCHIVE_ROOT}/software" && { echo "deleted."; DELETED=$((DELETED + 1)); }
+        echo "delete: ${FP}  ($(du -sh "${FP}" 2>/dev/null | cut -f1))"
+        echo
+        echo "  *** READ THIS BEFORE SETTING DRYRUN=0 ***"
+        echo "  Only my_images/fmriprep-25.1.4.sif (2.3 GB) is verified-duplicated,"
+        echo "  at ${HOME_ROOT}/software/fmriprep-25.1.4.sif."
+        echo "  The rest of this tree exists NOWHERE ELSE and has no backup:"
+        for sub in outputs_plt go preprocessing; do
+            [ -e "${FP}/${sub}" ] && echo "    ${FP}/${sub}  ($(du -sh "${FP}/${sub}" 2>/dev/null | cut -f1))  NO OTHER COPY"
+        done
+        echo "  Deleting it reclaims real, unrecoverable data, not just a stale container."
+        echo
+        if [ "${DRYRUN}" = "1" ]; then
+            echo "[dry run] would delete ${FP}"
+        else
+            rm -rf "${FP}" && { echo "deleted."; DELETED=$((DELETED + 1)); }
+        fi
     fi
+
+    banner "EXTRA: archive software/ — kept on purpose"
+    for keep in "${ARCHIVE_ROOT}/software/matlab-r2025a.sif" "${ARCHIVE_ROOT}/software/dcm2niix"; do
+        [ -e "${keep}" ] && echo "  KEEP  ${keep}  ($(du -sh "${keep}" 2>/dev/null | cut -f1))"
+    done
 else
     banner "EXTRA: archive software/ — NOT touched (PRUNE_SOFTWARE=0)"
 fi
+
+# --- Empty placeholder directories ---------------------------------------------
+# rmdir, never rm -rf: if any of these turns out to hold something after all, rmdir
+# fails harmlessly instead of destroying it. No stamp proof is needed to remove a
+# directory that is empty by definition.
+banner "EMPTY PLACEHOLDERS (rmdir — fails safely if not actually empty)"
+for d in "${ARCHIVE_ROOT}/Nielsen_archive" \
+         "${ARCHIVE_ROOT}/Luke_archive" \
+         "${LUKE_ARCHIVE%/Pilot}/Project/BIDS" \
+         "${LUKE_ARCHIVE%/Pilot}/Project/rawdata" \
+         "${LUKE_ARCHIVE%/Pilot}/Project/scripts" \
+         "${LUKE_ARCHIVE%/Pilot}/Project" \
+         "${ARCHIVE_ROOT}/personal_projects/ms_dataset/derivatives" \
+         "${ARCHIVE_ROOT}/personal_projects/ms_dataset/scripts" \
+         "${ARCHIVE_ROOT}/software/tedana"; do
+    [ -d "${d}" ] || { echo "SKIP — not present: ${d}"; continue; }
+    if [ -n "$(ls -A "${d}" 2>/dev/null)" ]; then
+        echo "SKIP — NOT empty, leaving alone: ${d}"
+        continue
+    fi
+    if [ "${DRYRUN}" = "1" ]; then
+        echo "[dry run] would rmdir ${d}"
+    else
+        rmdir "${d}" 2>/dev/null && echo "rmdir  ${d}" || echo "rmdir failed (not empty?): ${d}"
+    fi
+done
 
 # --- Summary --------------------------------------------------------------------
 banner "SUMMARY"

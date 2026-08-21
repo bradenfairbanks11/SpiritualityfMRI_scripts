@@ -22,7 +22,28 @@
 # CONFIGURATION — all paths come from config.sh, edit there
 # ============================================================
 # Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# --- Locate config.sh ---------------------------------------------------------
+# Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
+# (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
+# with probe job 13292417. Deriving the path from BASH_SOURCE alone therefore
+# fails inside every batch job — the script dies before doing any work.
+#
+# Resolved in order of decreasing reliability:
+#   $PIPELINE_CONFIG   explicit override (used by audit_paths.sh fixture tests)
+#   $SLURM_SUBMIT_DIR  where sbatch was invoked — correct for the normal workflow
+#   dirname BASH_SOURCE  correct when run directly with bash, wrong under sbatch
+#   the install path   last-resort absolute
+CONFIG=""
+for _c in "${PIPELINE_CONFIG:-}" \
+          "${SLURM_SUBMIT_DIR:-}/config.sh" \
+          "${SLURM_SUBMIT_DIR:-}/../config.sh" \
+          "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config.sh" \
+          "/home/bradenf4/spirituality_fmri/scripts/config.sh"; do
+    case "${_c}" in ""|"/config.sh"|"/../config.sh") continue ;; esac
+    [ -f "${_c}" ] && { CONFIG="${_c}"; break; }
+done
+[ -n "${CONFIG}" ] || { echo "FATAL: cannot locate config.sh (set PIPELINE_CONFIG)" >&2; exit 1; }
+source "${CONFIG}"
 # Provides: BIDS_DIR FMRIPREP_OUT TEDANA_OUT LOGS CONDA_ENV
 # ============================================================
 
@@ -55,6 +76,7 @@ for arg in "$@"; do
 #SBATCH --time=12:00:00
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=bradenfairbanks@gmail.com
+#SBATCH --chdir=${WORK_ROOT}
 
 set -euo pipefail
 

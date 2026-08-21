@@ -7,7 +7,7 @@ work here, read the local copy of the ORC agent instructions:
 
     ./BYU_ORC_AGENTS.md
 
-Upstream version: 2026-08-11, synced 2026-08-19 from
+Upstream version: 2026-08-11, synced 2026-08-21 (verified byte-identical to upstream) from
 `/apps/instructions_for_ai_agents/BYU_ORC_AGENTS.md`
 (mirror: https://rc.byu.edu/documentation/BYU_ORC_AGENTS.md).
 
@@ -41,8 +41,13 @@ this project, or the derivatives — 10–12 h of fMRIPrep per subject — are d
 
 - **`#SBATCH` directives are parsed by Slurm before the shell runs.** Shell variables do not
   expand there. Log paths in directly-submitted scripts must be literal absolutes.
-- **`$0` under sbatch** points at a spool copy, not this repo. Source `config.sh` via
-  `${BASH_SOURCE[0]}`, as every script here does.
+- **Under `sbatch`, BOTH `$0` and `${BASH_SOURCE[0]}` point at Slurm's spool copy**
+  (`/var/spool/slurmd/job<N>/slurm_script`) — not at this repo. Verified 2026-08-21
+  with probe job 13292417. Earlier guidance here said `${BASH_SOURCE[0]}` was the fix
+  for `$0`; it is not, and every directly-submitted job script died on its
+  `source config.sh` line until this was corrected. Use the `CONFIG=""` resolver
+  block the scripts now carry: `$PIPELINE_CONFIG`, then `$SLURM_SUBMIT_DIR`, then
+  `dirname ${BASH_SOURCE[0]}` (right only when run with `bash`), then the install path.
 - **Apptainer `--bind` must span all three tiers** (`${BIND_ARGS}`). Inputs are on scratch,
   raw data on archive, containers and timing files on home. A single-root bind fails
   *silently* inside the container.

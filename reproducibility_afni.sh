@@ -9,6 +9,10 @@
 #SBATCH --time=04:00:00
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=bradenfairbanks@gmail.com
+# Run the job in scratch, not the submit dir. #SBATCH is parsed by Slurm before
+# the shell runs, so this must be a literal absolute path -- ${WORK_ROOT} would
+# not expand. Keeps stray relative-path output off /home.
+#SBATCH --chdir=/nobackup/autodelete/usr/bradenf4/work/Spirituality
 
 # =============================================================================
 # Spirituality fMRI — TEST-RETEST RELIABILITY (ses-1 vs ses-2), AFNI
@@ -76,7 +80,28 @@ set -o pipefail
 
 # --- All paths come from config.sh; edit there, not here ---
 # Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# --- Locate config.sh ---------------------------------------------------------
+# Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
+# (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
+# with probe job 13292417. Deriving the path from BASH_SOURCE alone therefore
+# fails inside every batch job — the script dies before doing any work.
+#
+# Resolved in order of decreasing reliability:
+#   $PIPELINE_CONFIG   explicit override (used by audit_paths.sh fixture tests)
+#   $SLURM_SUBMIT_DIR  where sbatch was invoked — correct for the normal workflow
+#   dirname BASH_SOURCE  correct when run directly with bash, wrong under sbatch
+#   the install path   last-resort absolute
+CONFIG=""
+for _c in "${PIPELINE_CONFIG:-}" \
+          "${SLURM_SUBMIT_DIR:-}/config.sh" \
+          "${SLURM_SUBMIT_DIR:-}/../config.sh" \
+          "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config.sh" \
+          "/home/bradenf4/spirituality_fmri/scripts/config.sh"; do
+    case "${_c}" in ""|"/config.sh"|"/../config.sh") continue ;; esac
+    [ -f "${_c}" ] && { CONFIG="${_c}"; break; }
+done
+[ -n "${CONFIG}" ] || { echo "FATAL: cannot locate config.sh (set PIPELINE_CONFIG)" >&2; exit 1; }
+source "${CONFIG}"
 # Provides: TEDANA_OUT AFNI_OUT REPRO_OUT GROUP_OUT RLIB AFNI_SIF LOGS BIND_ARGS
 
 # --- Group-level mean_response activation map (from second_level_afni.sh STEP 3).
@@ -111,7 +136,7 @@ SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
 # ==============================================================================
 
-mkdir -p "${LOGS}" "${REPRO_OUT}" "${RLIB}"
+mkdir -p "${LOGS}" "${REPRO_OUT}"
 
 module load apptainer/1.3.6-qycanb2
 
@@ -121,12 +146,19 @@ AFNI="apptainer exec --env AFNI_DECONFLICT=OVERWRITE ${BIND_ARGS} ${AFNI_SIF} ba
 # map). Exposes the persistent R library so those R programs find their packages.
 AFNI_R="apptainer exec --env AFNI_DECONFLICT=OVERWRITE --env R_LIBS_USER=${RLIB} ${BIND_ARGS} ${AFNI_SIF} bash -c"
 
-# --- Bootstrap: install the ICC R packages into RLIB on first run ---
+# --- Precondition: the ICC R packages must already be in RLIB ---
 #   spatial ICC (irr) + 3dICC (blme, lme4, metafor, snow).
+# This used to attempt install.packages() inline. Compute nodes have NO internet,
+# so that could never reach CRAN from inside a job. Check and fail fast instead.
 ICC_PKGS='c("irr","lme4","blme","metafor","snow")'
 if ! ${AFNI_R} "Rscript -e 'q(status=length(setdiff(${ICC_PKGS}, rownames(installed.packages()))))'"; then
-    echo "Installing ICC R packages into ${RLIB} (irr, lme4, blme, metafor, snow) ..."
-    ${AFNI_R} "Rscript -e 'options(repos=c(CRAN=\"https://cloud.r-project.org\")); p<-setdiff(${ICC_PKGS}, rownames(installed.packages())); if(length(p)) install.packages(p, lib=Sys.getenv(\"R_LIBS_USER\"))'"
+    echo "ERROR: the ICC R packages are missing from ${RLIB}."
+    echo "       (need: irr, lme4, blme, metafor, snow)"
+    echo
+    echo "They cannot be installed from here — compute nodes have no internet."
+    echo "Run this once on a LOGIN NODE, then resubmit:"
+    echo "    bash ${PROJ_HOME}/scripts/setup_rlib.sh"
+    exit 1
 fi
 
 # --- Stage the spatial-ICC R helper somewhere the container can read (under BIND) ---

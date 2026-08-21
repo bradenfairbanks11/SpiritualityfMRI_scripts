@@ -5,8 +5,11 @@
 # Source this at the top of every script in this directory:
 #     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
 #
-# Use the absolute form above rather than "$(dirname "$0")" — under sbatch, $0 points
-# at a copy in the Slurm spool directory, not at this repo.
+# NOTE: the one-liner above is only correct when a script is run with `bash`. Under
+# sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
+# (/var/spool/slurmd/job<N>/slurm_script), so `dirname` lands in the spool dir and
+# the source fails. Directly-submitted job scripts therefore use the CONFIG="" resolver
+# block ($PIPELINE_CONFIG / $SLURM_SUBMIT_DIR / dirname / install path) instead.
 #
 # ---------------------------------------------------------------------------
 # Storage strategy (decided 2026-08-19). See ./BYU_ORC_AGENTS.md and

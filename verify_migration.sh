@@ -36,9 +36,13 @@
 #               Archive has no backups, so "probably fine" is not good enough there.
 #
 # OUTPUT:
-#   On a clean run it writes ../logs/migration_verified.txt listing each PASSing
-#   component. prune_archive.sh REFUSES to delete a component not listed in that file.
-#   That interlock is the entire point of this script — do not hand-edit that file.
+#   Writes ../logs/migration_verified.txt listing each PASSing component, whenever
+#   at least one component passes. prune_archive.sh REFUSES to delete a component
+#   not listed in that file. That per-component interlock is the entire point of
+#   this script — do not hand-edit that file.
+#
+#   A FAILING component is simply omitted from the stamp, so it stays undeletable
+#   while its passing siblings can proceed. The stamp is not all-or-nothing.
 #
 # USAGE:
 #   sbatch verify_migration.sh                        # fast check
@@ -161,6 +165,81 @@ verify_component() {
     fi
 }
 
+# Verify that every path under src also EXISTS under dst, WITHOUT requiring the
+# contents to match. This is the right question to ask about a tree that was
+# deliberately MERGED.
+#
+# ~/software/templateflow is the union of the archive copy and the ms-mri copy,
+# and migrate_storage.sh rsynced them in that order, so where the two disagreed
+# the ms-mri copy won. Asking "did every archive byte survive?" is therefore
+# unanswerable by construction: it can never pass. On 2026-08-20 (job 13243193)
+# it reported 92 differing files and, because the stamp used to require a
+# completely clean run, vetoed 14 other components that HAD passed a full
+# checksum audit.
+#
+# Those 92 files are the older release losing to the newer one — archive's copy
+# is dated 2025-08-07, home's 2026-06-30, and no template directory exists only
+# in archive. 90 of them are tpl-MNIInfant cohorts; the other two are a
+# MNI152NLin2009cAsym description that gained a res-03 entry and a Harvard-Oxford
+# label table that grew from 27 to 49 rows.
+#
+# "Is every archive path present at the destination?" IS answerable, and it is
+# the actual precondition for deleting the archive copy: nothing goes missing.
+# rsync itemizes a file absent from the destination as '>f+++++++++' — the nine
+# '+' mean "newly created". A file that exists but differs itemizes with letters
+# and dots instead ('>fcst......'), and is ignored here on purpose.
+#
+# Content comparison is deliberately cheap regardless of MODE: this check is about
+# existence, so there is no reason to checksum 10 GB to answer it.
+verify_coverage() {
+    local label="$1" src="$2" dst="$3"
+    banner "${label}"
+
+    if [ ! -e "${src}" ]; then
+        echo "SKIP — source no longer exists: ${src}"
+        return 0
+    fi
+    if [ ! -e "${dst}" ]; then
+        echo "src: ${src}   [$(tree_stats "${src}")]"
+        echo "dst: ${dst}"
+        echo "FAIL: destination does not exist."
+        FAILED=$((FAILED + 1))
+        return 1
+    fi
+
+    echo "src: ${src}   [$(tree_stats "${src}")]"
+    echo "dst: ${dst}   [$(tree_stats "${dst}")]"
+    echo "mode: coverage (every source path must exist at the destination;"
+    echo "      differing content is expected here and is not a failure)"
+
+    local out rc
+    out=$(rsync -a --dry-run --itemize-changes --size-only --exclude 'timing/' \
+                "${src}/" "${dst}/" 2>&1)
+    rc=$?
+    if [ ${rc} -ne 0 ]; then
+        echo "FAIL: rsync itself errored (exit ${rc}):"
+        echo "${out}" | head -20
+        FAILED=$((FAILED + 1))
+        return 1
+    fi
+
+    local missing n
+    missing=$(echo "${out}" | awk '/^>f\+\+\+\+\+\+\+\+\+/ {print}')
+    n=$(echo -n "${missing}" | grep -c .)
+
+    if [ "${n}" -eq 0 ]; then
+        echo "PASS: all $(find "${src}" -type f 2>/dev/null | wc -l) source paths exist at the destination."
+        echo "      Deleting the source would lose nothing."
+        PASSED=$((PASSED + 1))
+        PASS_LIST+=("${label}")
+    else
+        echo "FAIL: ${n} source path(s) do NOT exist at the destination."
+        echo "--- first 25 ---"
+        echo "${missing}" | head -25
+        FAILED=$((FAILED + 1))
+    fi
+}
+
 echo "verify_migration.sh   MODE=${MODE}   host=$(hostname)   started $(date)"
 echo "job: ${SLURM_JOB_ID:-<none, running outside Slurm>}"
 if [ "${MODE}" = "full" ] && [ -z "${SLURM_JOB_ID:-}" ]; then
@@ -173,7 +252,7 @@ fi
 # --- Shared software ----------------------------------------------------------
 # templateflow is the union of the archive copy and the ms-mri copy, so it is checked
 # once per source. Extra destination files are not flagged, which makes that work.
-verify_component "SOFTWARE: TemplateFlow (from archive)" \
+verify_coverage  "SOFTWARE: TemplateFlow (archive superseded)" \
                  "${ARCHIVE_ROOT}/software/templateflow" "${HOME_ROOT}/software/templateflow"
 verify_component "SOFTWARE: TemplateFlow (from ms-mri)" \
                  "${SCRATCH_ROOT}/ms_dataset/templateflow" "${HOME_ROOT}/software/templateflow"
@@ -209,28 +288,52 @@ banner "SUMMARY"
 echo "finished $(date)"
 echo "mode: ${MODE}    passed: ${PASSED}    failed: ${FAILED}"
 
-if [ "${FAILED}" -eq 0 ] && [ "${PASSED}" -gt 0 ]; then
+# The stamp lists ONLY the components that actually passed, and it is written
+# whenever at least one did. It is deliberately NOT all-or-nothing.
+#
+# Gating already happens per component, one level down: prune_archive.sh refuses
+# to delete anything whose exact label is not marked PASS here (see its prune(),
+# "Layer 1"). So a component that failed simply never gets a PASS| line and can
+# never be deleted — which is the guarantee that actually matters.
+#
+# Requiring a globally clean run on top of that added no safety and cost real
+# safety: on 2026-08-20 one cosmetic software mismatch suppressed the whole stamp
+# and blocked 14 components that had passed a full checksum audit, leaving ~250 GB
+# duplicated on a tier that is being migrated to slower disks.
+if [ "${PASSED}" -gt 0 ]; then
     {
         echo "# migration verification stamp — written by verify_migration.sh"
         echo "# DO NOT HAND-EDIT. prune_archive.sh trusts this file to decide what is"
         echo "# safe to delete from an un-backed-up filesystem."
+        echo "# Only components listed PASS| below are deletable. Anything absent is not."
         echo "mode=${MODE}"
         echo "date=$(date -Iseconds)"
         echo "job=${SLURM_JOB_ID:-none}"
+        echo "passed=${PASSED}"
+        echo "failed=${FAILED}"
         for c in "${PASS_LIST[@]}"; do echo "PASS|${c}"; done
     } > "${STAMP}"
     echo
-    echo "Wrote verification stamp: ${STAMP}"
+    echo "Wrote verification stamp: ${STAMP}  (${PASSED} PASS, ${FAILED} FAIL)"
+    if [ "${FAILED}" -ne 0 ]; then
+        echo
+        echo "*** ${FAILED} component(s) FAILED and are NOT in the stamp. ***"
+        echo "prune_archive.sh will refuse to delete those. Re-copy them with"
+        echo "migrate_storage.sh (rsync is restartable — it only sends what is"
+        echo "missing) and verify again before expecting them to be pruned."
+    fi
     if [ "${MODE}" = "full" ]; then
-        echo "MODE=full passed. Deleting the verified archive copies is now safe."
+        echo
+        echo "MODE=full. Deleting the components listed above is now safe."
     else
-        echo "NOTE: this was the FAST check (size + mtime). Re-run with MODE=full"
-        echo "      before deleting anything from archive."
+        echo
+        echo "NOTE: this was the FAST check (size only). Re-run with MODE=full"
+        echo "      before deleting anything from archive — prune_archive.sh"
+        echo "      will refuse a non-full stamp anyway."
     fi
 else
     echo
-    echo "*** VERIFICATION DID NOT PASS CLEANLY. DELETE NOTHING. ***"
-    echo "No stamp written. Re-copy the failing components with migrate_storage.sh"
-    echo "(rsync is restartable — it only sends what is missing) and verify again."
+    echo "*** NOTHING PASSED. DELETE NOTHING. ***"
+    echo "No stamp written. Re-copy with migrate_storage.sh and verify again."
 fi
 exit "${FAILED}"

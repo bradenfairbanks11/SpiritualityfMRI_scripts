@@ -9,6 +9,10 @@
 #SBATCH --time=12:00:00
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=bradenfairbanks@gmail.com
+# Run the job in scratch, not the submit dir. #SBATCH is parsed by Slurm before
+# the shell runs, so this must be a literal absolute path -- ${WORK_ROOT} would
+# not expand. Keeps stray relative-path output off /home.
+#SBATCH --chdir=/nobackup/autodelete/usr/bradenf4/work/Spirituality
 
 # =============================================================================
 # Spirituality fMRI — First-Level GLM with PARAMETRIC MODULATION (AFNI)
@@ -51,7 +55,28 @@ set -e
 
 # --- All paths come from config.sh; edit there, not here ---
 # Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# --- Locate config.sh ---------------------------------------------------------
+# Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
+# (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
+# with probe job 13292417. Deriving the path from BASH_SOURCE alone therefore
+# fails inside every batch job — the script dies before doing any work.
+#
+# Resolved in order of decreasing reliability:
+#   $PIPELINE_CONFIG   explicit override (used by audit_paths.sh fixture tests)
+#   $SLURM_SUBMIT_DIR  where sbatch was invoked — correct for the normal workflow
+#   dirname BASH_SOURCE  correct when run directly with bash, wrong under sbatch
+#   the install path   last-resort absolute
+CONFIG=""
+for _c in "${PIPELINE_CONFIG:-}" \
+          "${SLURM_SUBMIT_DIR:-}/config.sh" \
+          "${SLURM_SUBMIT_DIR:-}/../config.sh" \
+          "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config.sh" \
+          "/home/bradenf4/spirituality_fmri/scripts/config.sh"; do
+    case "${_c}" in ""|"/config.sh"|"/../config.sh") continue ;; esac
+    [ -f "${_c}" ] && { CONFIG="${_c}"; break; }
+done
+[ -n "${CONFIG}" ] || { echo "FATAL: cannot locate config.sh (set PIPELINE_CONFIG)" >&2; exit 1; }
+source "${CONFIG}"
 # Provides: BIDS_DIR RAWDATA_DIR FMRIPREP_OUT TEDANA_OUT AFNI_OUT TIMING_DIR
 #           PARTICIPANTS_TSV AFNI_SIF LOGS BIND_ARGS
 #
@@ -89,7 +114,10 @@ block_dur_for() {
 
 # ==============================================================================
 
-mkdir -p logs "${AFNI_OUT}"
+# "${LOGS}", not a bare "logs": #SBATCH --chdir puts the job's CWD on scratch, and
+# before that it was the submit dir. Either way a relative "logs" is not this repo's
+# log dir — it used to scatter logs/ directories into the script tree.
+mkdir -p "${LOGS}" "${AFNI_OUT}"
 
 module load apptainer/1.3.6-qycanb2
 

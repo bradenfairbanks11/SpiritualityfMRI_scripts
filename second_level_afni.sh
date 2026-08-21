@@ -9,6 +9,10 @@
 #SBATCH --time=8:00:00
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=bradenfairbanks@gmail.com
+# Run the job in scratch, not the submit dir. #SBATCH is parsed by Slurm before
+# the shell runs, so this must be a literal absolute path -- ${WORK_ROOT} would
+# not expand. Keeps stray relative-path output off /home.
+#SBATCH --chdir=/nobackup/autodelete/usr/bradenf4/work/Spirituality
 
 # =============================================================================
 # Spirituality fMRI — SECOND-LEVEL (GROUP) ANALYSIS (AFNI)
@@ -51,7 +55,28 @@ set -e
 
 # --- All paths come from config.sh; edit there, not here ---
 # Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
+# --- Locate config.sh ---------------------------------------------------------
+# Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
+# (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
+# with probe job 13292417. Deriving the path from BASH_SOURCE alone therefore
+# fails inside every batch job — the script dies before doing any work.
+#
+# Resolved in order of decreasing reliability:
+#   $PIPELINE_CONFIG   explicit override (used by audit_paths.sh fixture tests)
+#   $SLURM_SUBMIT_DIR  where sbatch was invoked — correct for the normal workflow
+#   dirname BASH_SOURCE  correct when run directly with bash, wrong under sbatch
+#   the install path   last-resort absolute
+CONFIG=""
+for _c in "${PIPELINE_CONFIG:-}" \
+          "${SLURM_SUBMIT_DIR:-}/config.sh" \
+          "${SLURM_SUBMIT_DIR:-}/../config.sh" \
+          "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config.sh" \
+          "/home/bradenf4/spirituality_fmri/scripts/config.sh"; do
+    case "${_c}" in ""|"/config.sh"|"/../config.sh") continue ;; esac
+    [ -f "${_c}" ] && { CONFIG="${_c}"; break; }
+done
+[ -n "${CONFIG}" ] || { echo "FATAL: cannot locate config.sh (set PIPELINE_CONFIG)" >&2; exit 1; }
+source "${CONFIG}"
 # Provides: DERIV AFNI_OUT FMRIPREP_OUT GROUP_OUT FINAL_DIR RLIB AFNI_SIF
 #           LOGS BIND_ARGS
 AFNI_FIRSTLVL=${AFNI_OUT}
@@ -94,10 +119,18 @@ mkdir -p "${RLIB}"
 # container, and expose the persistent R library so 3dMEMA finds its packages.
 AFNI="apptainer exec ${BIND_ARGS} --env R_LIBS_USER=${RLIB} ${AFNI_SIF} bash -c"
 
-# --- Bootstrap: install 3dMEMA's R packages into RLIB on first run ---
+# --- Precondition: 3dMEMA's R packages must already be in RLIB ---
+# This used to try install.packages() right here. That can never work: compute
+# nodes have NO internet, so CRAN is unreachable from inside a job. Check and
+# fail fast with a pointer to the login-node installer instead of dying later,
+# deep inside 3dMEMA, with an opaque R error.
 if ! ${AFNI} "Rscript -e 'q(status=length(setdiff(c(\"data.table\",\"snow\"), rownames(installed.packages()))))'"; then
-    echo "Installing 3dMEMA R packages (snow, data.table) into ${RLIB} ..."
-    ${AFNI} "Rscript -e 'options(repos=c(CRAN=\"https://cloud.r-project.org\")); install.packages(c(\"snow\",\"data.table\"), lib=Sys.getenv(\"R_LIBS_USER\"))'"
+    echo "ERROR: 3dMEMA's R packages (snow, data.table) are missing from ${RLIB}."
+    echo
+    echo "They cannot be installed from here — compute nodes have no internet."
+    echo "Run this once on a LOGIN NODE, then resubmit:"
+    echo "    bash ${PROJ_HOME}/scripts/setup_rlib.sh"
+    exit 1
 fi
 
 mkdir -p "${LOGS}" "${GROUP_OUT}"/{inputs,mask,mema,ttest,clustsim}
@@ -449,24 +482,31 @@ else
 fi
 
 # ==============================================================================
-# STEP 7 — Persist small final maps from scratch back to archive
-# (autodelete is periodically purged; the group results are small.)
+# STEP 7 — Retention is NOT done here any more (2026-08-21)
+#
+# This step used to `cp -a` the group maps into ${GROUP_FINAL} on archive. Two
+# problems with doing that from inside this job:
+#   1. It is archive I/O from a batch job. BYU RC: "Archive storage should
+#      generally NOT be used directly from batch jobs", and archive is migrating
+#      to a much slower backing store.
+#   2. It wrote an untarred tree onto a tier with a 1 M inode cap, every single
+#      run, silently accumulating near-duplicate copies.
+#
+# promote_to_archive.sh already does this correctly: from a login node, filtered
+# to the products worth keeping, and tarred. Run it when you park the project.
 # ==============================================================================
 echo "=============================================================="
-echo "STEP 7: copying final maps to ${GROUP_FINAL}"
+echo "STEP 7: skipped — retention now belongs to promote_to_archive.sh"
 echo "=============================================================="
-mkdir -p "${GROUP_FINAL}"
-for d in mask mema ttest clustsim; do
-    [ -d "${GROUP_OUT}/${d}" ] || continue
-    mkdir -p "${GROUP_FINAL}/${d}"
-    cp -a "${GROUP_OUT}/${d}"/. "${GROUP_FINAL}/${d}/" 2>/dev/null || true
-done
+echo "Group results stay on SCRATCH: ${GROUP_OUT}"
+echo "SCRATCH IS PURGED AFTER 12 WEEKS UNUSED. Before parking this project run:"
+echo "    bash ${PROJ_HOME}/scripts/promote_to_archive.sh"
 
 echo "=============================================================="
 echo "Group analysis complete."
 echo "  n subjects discovered: ${#SUBJECTS[@]}  (${SUBJECTS[*]})"
 echo "  scratch (working) : ${GROUP_OUT}"
-echo "  archive (kept)    : ${GROUP_FINAL}  <- mema/ ttest/ mask/ clustsim/"
+echo "  archive (kept)    : nothing yet - run promote_to_archive.sh to persist"
 echo "  NOTE: with only a few subjects this is UNDERPOWERED - expect no"
 echo "        surviving clusters. Re-run as sub-02/sub-04 and more sessions"
 echo "        finish; new first-level output is picked up automatically."
