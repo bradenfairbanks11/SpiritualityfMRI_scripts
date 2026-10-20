@@ -75,6 +75,11 @@ fi
 
 # --- Preflight: R-based AFNI programs must start (catches the R_io.so mismatch) ---
 if want icc || want trr_vox; then
+    for prog in 3dICC 3dLMEr TRR Rscript; do
+        if ! command -v "${prog}" >/dev/null 2>&1; then
+            echo "FATAL: ${prog} is not on PATH (is ~/abin on PATH in this shell?)" >&2; exit 1
+        fi
+    done
     if ! 3dLMEr -help >/dev/null 2>&1 || ! 3dICC -help >/dev/null 2>&1; then
         echo "FATAL: AFNI's R programs (3dICC / 3dLMEr) crash on start-up." >&2
         echo "  AFNI R bridge links against: $(otool -L "$(dirname "$(command -v afni)")/R_io.so" 2>/dev/null | awk '/libR.dylib/ {print $1}')" >&2
