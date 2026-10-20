@@ -46,6 +46,9 @@ export RAWDATA_DIR=${PROJ_ARCHIVE}/rawdata
 export PARTICIPANTS_TSV=${RAWDATA_DIR}/participants.tsv
 export RUN_ORDER_TSV=${RAWDATA_DIR}/run_order_plain.tsv
 
+# ---- Excluded runs: exclusions.tsv next to this file, checked via is_excluded ----
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/exclusions.sh"
+
 # ---- Unregenerable inputs: HOME (backed up) ----
 # The *_ratingAM.1D timing files are produced by generate_timing_files.py on Braden's
 # LOCAL machine — that generator is not in this repo and does not run on the cluster.

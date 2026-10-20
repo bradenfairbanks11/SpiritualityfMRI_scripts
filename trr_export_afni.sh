@@ -94,6 +94,10 @@ for TASK in "${TASKS[@]}"; do
         sid=$(basename "${d}")
         ok=1
         for SES in "${SES1}" "${SES2}"; do
+            if why=$(is_excluded "${sid}" "${SES}" "${TASK}"); then
+                echo "  EXCLUDED (exclusions.tsv): ${sid} ${SES} task-${TASK} -- ${why}"
+                ok=0
+            fi
             b=${AFNI_OUT}/${sid}/${SES}/task-${TASK}/single_trial/${sid}_${SES}_task-${TASK}_IM_betas+tlrc.HEAD
             [ -f "${b}" ] || ok=0
         done

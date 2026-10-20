@@ -162,6 +162,12 @@ for HEAD in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_stats_REML+tlrc.HEAD; do
     SES=$(basename "${ses_dir}")
     TASK=$(basename "${task_dir}"); TASK=${TASK#task-}
 
+    # Outputs of excluded runs may still be on disk from an earlier run.
+    if why=$(is_excluded "${SUB}" "${SES}" "${TASK}"); then
+        echo "  EXCLUDED (exclusions.tsv): ${SUB} ${SES} task-${TASK} -- ${why}"
+        continue
+    fi
+
     key="${SUB} ${TASK}"
     SESS["${key}"]="${SESS[${key}]} ${SES}"
     if [[ ! " ${SUBJECTS[*]} " == *" ${SUB} "* ]]; then
@@ -308,6 +314,9 @@ ${AFNI} "3dinfo -same_grid ${GROUPMASK} ${INPUTS}/*_slope_Coef.nii.gz" || true
 subs_with() {  # <task> <effect>
     local task="$1" eff="$2" s
     for s in "${SUBJECTS[@]}"; do
+        # Require sessions discovered in STEP 0 too, so a stale input file left by
+        # an earlier run of a since-excluded run is never pooled.
+        [ -n "${SESS[${s} ${task}]}" ] || continue
         [ -f "${INPUTS}/${s}_task-${task}_${eff}_Coef.nii.gz" ] && echo "${s}"
     done
 }
@@ -461,6 +470,9 @@ acf_file=${CLUSTDIR}/acf_params.txt
 : > "${acf_file}"
 for ERRTS in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_errts_REML+tlrc.HEAD; do
     [ -e "${ERRTS}" ] || continue
+    _t=$(basename "$(dirname "${ERRTS}")"); _s=$(basename "$(dirname "$(dirname "${ERRTS}")")")
+    _p=$(basename "$(dirname "$(dirname "$(dirname "${ERRTS}")")")")
+    is_excluded "${_p}" "${_s}" "${_t#task-}" >/dev/null && continue
     dset=${ERRTS%.HEAD}
     line=$(${AFNI} "3dFWHMx -acf ${CLUSTDIR}/acf_est.1D -mask ${GROUPMASK} -input ${dset} 2>/dev/null" | tail -n1)
     echo "${line}" >> "${acf_file}"

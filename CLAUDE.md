@@ -109,4 +109,14 @@ copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.s
   `dice_within_vs_between.R` — both per Gorgolewski et al. 2013 (NeuroImage 69:231).
 - Not yet in `promote_to_archive.sh`: `afni_trr/` and `afni_firstlvl/*/single_trial/`.
 
+## Excluded runs — `exclusions.tsv` (added 2026-10-20)
+
+Runs that must not enter ANY analysis are listed in `exclusions.tsv` (byv_id, session,
+task or `*`, reason, date). `config.sh` sources `exclusions.sh`, which provides
+`is_excluded <sub-NN|BYV> <ses> <task>`; every first-level loop and every downstream
+discovery loop (second level, reproducibility, TRR export) calls it. Old outputs of an
+excluded run stay on disk but are ignored. Add new exclusions there with a reason — never
+by deleting timing files (downstream scripts discover from disk, so that does not exclude).
+Current: 1VK4L2 ses-1, all tasks (asleep).
+
 Commit script edits to git rather than leaving `.bak` copies.

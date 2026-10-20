@@ -197,6 +197,11 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
 
         for TASK in "${TASKS[@]}"; do
 
+            if why=$(is_excluded "${PARTICIPANT_ID}" "${SES}" "${TASK}"); then
+                echo "Skipping ${PARTICIPANT_ID} ${SES} task-${TASK}: EXCLUDED (exclusions.tsv) -- ${why}"
+                continue
+            fi
+
             BOLD_IN=${TEDANA_FUNC}/${PARTICIPANT_ID}_${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
             CONFOUNDS=${FMRIPREP_OUT}/${PARTICIPANT_ID}/${SES}/func/${PARTICIPANT_ID}_${SES}_task-${TASK}_desc-confounds_timeseries.tsv
             TIMING=${TIMING_DIR}/byv-${BYV}_${SES}_task-${TASK}_ratingAM.1D

@@ -139,6 +139,10 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         SES=$(basename "${SES_DIR}")
 
         for TASK in "${TASKS[@]}"; do
+            if why=$(is_excluded "${PARTICIPANT_ID}" "${SES}" "${TASK}"); then
+                echo "Skipping ${PARTICIPANT_ID} ${SES} task-${TASK}: EXCLUDED (exclusions.tsv) -- ${why}"
+                continue
+            fi
             RUN_DIR=${AFNI_OUT}/${PARTICIPANT_ID}/${SES}/task-${TASK}
             PREFIX=${PARTICIPANT_ID}_${SES}_task-${TASK}
             SCALED=${RUN_DIR}/${PREFIX}_blurred_scaled.nii.gz

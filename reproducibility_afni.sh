@@ -331,6 +331,11 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             echo "skip: ${PARTICIPANT_ID} task-${TASK} -- missing a session's REML bucket (need both ${SES1} and ${SES2})"
             continue
         fi
+        if why=$(is_excluded "${PARTICIPANT_ID}" "${SES1}" "${TASK}") \
+           || why=$(is_excluded "${PARTICIPANT_ID}" "${SES2}" "${TASK}"); then
+            echo "skip: ${PARTICIPANT_ID} task-${TASK} -- EXCLUDED (exclusions.tsv): ${why}"
+            continue
+        fi
 
         # tedana bolds (only needed to build the brain mask)
         BOLD1=${TEDANA_OUT}/${PARTICIPANT_ID}/${SES1}/func/${PARTICIPANT_ID}_${SES1}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
@@ -640,6 +645,8 @@ for TASK in "${TASKS[@]}"; do
         sid=$(basename "${d}")
         h1=${AFNI_OUT}/${sid}/${SES1}/task-${TASK}/${sid}_${SES1}_task-${TASK}_stats_REML+tlrc.HEAD
         h2=${AFNI_OUT}/${sid}/${SES2}/task-${TASK}/${sid}_${SES2}_task-${TASK}_stats_REML+tlrc.HEAD
+        is_excluded "${sid}" "${SES1}" "${TASK}" >/dev/null && continue
+        is_excluded "${sid}" "${SES2}" "${TASK}" >/dev/null && continue
         { [ -f "${h1}" ] && [ -f "${h2}" ]; } && ICC_SUBS+=("${sid}")
     done
     n=${#ICC_SUBS[@]}
@@ -762,7 +769,10 @@ EOF
 for TASK in "${TASKS[@]}"; do
     WB_SUBS=()
     for d in "${REPRO_OUT}"/sub-*/task-${TASK}; do
-        [ -f "${d}/mask_both.nii.gz" ] && WB_SUBS+=("$(basename "$(dirname "${d}")")")
+        sid=$(basename "$(dirname "${d}")")
+        is_excluded "${sid}" "${SES1}" "${TASK}" >/dev/null && continue
+        is_excluded "${sid}" "${SES2}" "${TASK}" >/dev/null && continue
+        [ -f "${d}/mask_both.nii.gz" ] && WB_SUBS+=("${sid}")
     done
     n=${#WB_SUBS[@]}
     if [ "${n}" -lt 2 ]; then
