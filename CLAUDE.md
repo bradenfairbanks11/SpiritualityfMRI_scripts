@@ -87,4 +87,24 @@ Multi-echo fMRI, parametric "felt the Spirit" rating GLM (AFNI `-stim_times_AM2`
 `assign_fieldmaps.py` → `fmriprep_tedana.sh` → `first_level_afni.sh` →
 `second_level_afni.sh` / `reproducibility_afni.sh`, then `promote_to_archive.sh`.
 
+Trial-level reliability branch (added 2026-10-20): `first_level_IM_afni.sh` (one beta per
+trial via `-stim_times_IM`, reusing first_level_afni.sh's scaled data + motion files) →
+`trr_export_afni.sh` (per-trial NIfTIs, data tables, group-cluster ROIs into `${TRR_OUT}`) →
+copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.sh`.
+
+- **R-based AFNI programs do not run on the cluster** (3dICC fails in the container), so
+  3dICC, `3dLMEr -TRR` and `TRR` run locally via `local_r_steps.sh`. Cluster scripts must
+  stay pure-AFNI-C for anything new; `reproducibility_afni.sh` still *attempts* 3dICC and
+  records NA, leaving its inputs in `afni_reproducibility/group/` for the local run.
+- **`3dLMEr -TRR` hard-codes exactly 2 conditions × 2 sessions** (`runTRR` in 3dLMEr.R).
+  Trials are split by rating: low = 1–2, high = 3–4 (`HIGH_MIN` in first_level_IM_afni.sh).
+  FHS is excluded from the voxelwise run (too few high-rated trials); region-level `TRR`
+  handles a single condition and covers all three tasks.
+- **AFNI's TRR.R pre-sizes its posterior vector to 2000 draws.** Keep
+  chains × iterations / 2 ≥ 2000 or the reported TRR is biased toward 0.
+- `dice_clust` = cluster-corrected Dice (voxel p<.001, per-session ACF 3dClustSim, α=.05).
+  Both-empty map pairs score Dice 0 and within- vs between-subject Dice is tested with
+  `dice_within_vs_between.R` — both per Gorgolewski et al. 2013 (NeuroImage 69:231).
+- Not yet in `promote_to_archive.sh`: `afni_trr/` and `afni_firstlvl/*/single_trial/`.
+
 Commit script edits to git rather than leaving `.bak` copies.

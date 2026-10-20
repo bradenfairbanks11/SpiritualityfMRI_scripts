@@ -32,7 +32,13 @@
 #       hand-rolled, for provenance.
 #   * dice       (3ddot -dodice) : overlap of the two sessions' t-maps thresholded
 #       at p<PTHR (two-sided) -> do the same regions survive in both sessions?
+#   * dice_clust (3ddot -dodice) : same overlap, but each session's t-map is
+#       cluster-corrected first (voxel p<.001, per-session 3dClustSim, alpha .05).
+#       Both-empty pairs score 0 for every Dice (Gorgolewski et al. 2013).
 #   * scatter    (3dmaskdump)    : paired (ses-1, ses-2) betas dumped for plotting.
+#
+# GROUP DICE BASELINE: within- vs between-subject Dice for every task/contrast
+# (dice_within_between.tsv), tested by dice_within_vs_between.R.
 #
 # LEVEL 2 — ACROSS-SUBJECT (group), per task/contrast:
 #   * 3dICC ICC(2,1) two-way random effects -> a voxelwise ICC MAP, estimated by
@@ -122,6 +128,17 @@ CONTRASTS=(mean_response rating_slope)
 
 # --- Dice threshold: voxelwise p, two-sided (liberal on purpose, see header) ---
 PTHR=0.05
+
+# --- Cluster-corrected Dice (metric dice_clust) ---
+# Each session's t-map is thresholded at voxel p < CLUST_PTHR (bisided) and only
+# clusters >= k voxels are kept, where k comes from 3dClustSim run on THAT
+# session's own residual smoothness (3dFWHMx -acf on its errts_REML) for
+# cluster-level alpha CLUST_ATHR. p < .001 is the recommended lower limit for the
+# cluster-forming threshold (Woo, Krishnan & Wager 2014, NeuroImage 91:412-419;
+# Eklund et al. 2016 PNAS showed p = .01 inflates false positives badly). The
+# ACF model is AFNI's post-Eklund fix (Cox et al. 2017, Brain Connectivity 7:152).
+CLUST_PTHR=0.001
+CLUST_ATHR=0.05
 
 # --- Activation-mask threshold: voxelwise p, two-sided, on the group mean map ---
 ACT_PTHR=0.05
@@ -215,6 +232,58 @@ spatial_icc() {  # args: description  mask  s1_coef_selector  s2_coef_selector
     rm -f "${pairs}"
     [ -z "${val}" ] && val=NA
     printf '%s' "${val}"
+}
+
+# Dice overlap of two binary maps within a mask, echoed as "dice n_a n_b"
+# (n = suprathreshold voxels inside the mask). If BOTH maps are empty the Dice is
+# 0, not undefined -- the convention of Gorgolewski et al. (2013, NeuroImage
+# 69:231-243), "to penalise for lack of signal". Echoes "NA NA NA" on AFNI failure.
+dice_pair() {  # args: description  mask  map_a  map_b
+    local desc="$1" mask="$2" a="$3" b="$4" na nb d
+    read -r na nb d <<< "$(${AFNI} "3dBrickStat -mask ${mask} -non-zero -count ${a}; \
+        3dBrickStat -mask ${mask} -non-zero -count ${b}; \
+        3ddot -dodice -mask ${mask} ${a} ${b}" 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+    if [ -z "${na}" ] || [ -z "${nb}" ]; then
+        echo "  WARN: dice ${desc} -- AFNI produced no value; recording NA" >&2
+        printf 'NA NA NA'; return
+    fi
+    if [ "${na}" -eq 0 ] && [ "${nb}" -eq 0 ]; then
+        d=0
+    fi
+    [ -z "${d}" ] && d=NA
+    printf '%s %s %s' "${d}" "${na}" "${nb}"
+}
+
+# Minimum cluster size (voxels) for one session: 3dFWHMx -acf on that session's
+# REML residuals -> 3dClustSim. Cached next to `prefix` and recomputed only when
+# the residuals are newer than the cached table. Echoes k (rounded up) or "".
+session_clust_k() {  # args: errts_dataset(no .HEAD)  mask  prefix
+    local errts="$1" mask="$2" pre="$3" acf a b c k
+    if [ ! -f "${pre}.NN1_bisided.1D" ] || [ "${errts}.HEAD" -nt "${pre}.NN1_bisided.1D" ]; then
+        acf=$(${AFNI} "3dFWHMx -acf ${pre}_acf.1D -mask ${mask} -input ${errts}" 2>/dev/null | tail -n1)
+        read -r a b c _ <<< "${acf}"
+        if [ -z "${c}" ]; then
+            echo "  WARN: 3dFWHMx -acf failed on ${errts}; no cluster threshold" >&2
+            return
+        fi
+        ${AFNI} "OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4} 3dClustSim -mask ${mask} -acf ${a} ${b} ${c} \
+            -pthr ${CLUST_PTHR} -athr ${CLUST_ATHR} -quiet -prefix ${pre}" >/dev/null 2>&1
+    fi
+    k=$(awk '!/^#/ && NF>=2 { k=$2; print (k==int(k)) ? k : int(k)+1; exit }' "${pre}.NN1_bisided.1D" 2>/dev/null)
+    printf '%s' "${k}"
+}
+
+# Binary cluster-corrected map: voxel p < CLUST_PTHR (bisided, from the bucket's
+# own t dof), clusters >= k voxels (NN1). An empty map is still written
+# (-outvol_if_no_clust) so "no surviving clusters" is a value, not a missing file.
+clust_map() {  # args: stats_bucket  tstat_label  mask  k  out.nii.gz
+    local idx="${5%.nii.gz}_idx.nii.gz"
+    rm -f "${idx}" "${5}"
+    ${AFNI} "3dClusterize -inset ${1} -ithr '${2}' -mask ${3} -NN 1 -bisided p=${CLUST_PTHR} \
+            -clust_nvox ${4} -pref_map ${idx} -outvol_if_no_clust \
+        && 3dcalc -overwrite -a ${idx} -expr 'step(a)' -prefix ${5}" >/dev/null 2>&1
+    rm -f "${idx}"
+    [ -f "${5}" ]
 }
 
 # ==============================================================================
@@ -427,6 +496,24 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         MASKS+=("wholebrain:${MASK}")
 
         # ------------------------------------------------------------------
+        # STEP B: per-session cluster-size thresholds for dice_clust. Each
+        # session uses its own residual smoothness (sessions can differ in
+        # motion/censoring), computed once per task and shared by contrasts.
+        # ------------------------------------------------------------------
+        E1=${AFNI_OUT}/${PARTICIPANT_ID}/${SES1}/task-${TASK}/${PARTICIPANT_ID}_${SES1}_task-${TASK}_errts_REML+tlrc
+        E2=${AFNI_OUT}/${PARTICIPANT_ID}/${SES2}/task-${TASK}/${PARTICIPANT_ID}_${SES2}_task-${TASK}_errts_REML+tlrc
+        K1=""; K2=""
+        [ -f "${E1}.HEAD" ] && K1=$(session_clust_k "${E1}" "${MASK}" "${OUT}/clustsim_${SES1}")
+        [ -f "${E2}.HEAD" ] && K2=$(session_clust_k "${E2}" "${MASK}" "${OUT}/clustsim_${SES2}")
+        if [ -z "${K1}" ] || [ -z "${K2}" ]; then
+            echo "  WARN: ${TASK} -- no cluster threshold (k1='${K1}' k2='${K2}'; missing errts_REML?); dice_clust=NA" >&2
+        else
+            echo "  cluster thresholds (p<${CLUST_PTHR}, alpha=${CLUST_ATHR}, NN1 bisided): ${SES1} k=${K1}  ${SES2} k=${K2}"
+            add_metric "${PARTICIPANT_ID}" "${TASK}" all tstat clust_k_${SES1} wholebrain "${K1}"
+            add_metric "${PARTICIPANT_ID}" "${TASK}" all tstat clust_k_${SES2} wholebrain "${K2}"
+        fi
+
+        # ------------------------------------------------------------------
         # Per contrast: spatial_r (beta & t), spatial_icc (beta), Dice (t) within
         # each mask; scatter + diff once (whole-brain).
         # ------------------------------------------------------------------
@@ -451,6 +538,20 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 echo "  WARN: ${CON} -- empty p2dsetstat threshold (thr1='${THR1}' thr2='${THR2}'); dice=NA" >&2
             fi
 
+            # Cluster-corrected binary maps (dice_clust), whole-brain clustering;
+            # the mask is applied afterwards by dice_pair, like the p<.05 maps.
+            CL1=${OUT}/clust_${SES1}_${CON}.nii.gz
+            CL2=${OUT}/clust_${SES2}_${CON}.nii.gz
+            CLUST_OK=0
+            if [ -n "${K1}" ] && [ -n "${K2}" ]; then
+                if clust_map "${S1}" "${TSTAT}" "${MASK}" "${K1}" "${CL1}" \
+                   && clust_map "${S2}" "${TSTAT}" "${MASK}" "${K2}" "${CL2}"; then
+                    CLUST_OK=1
+                else
+                    echo "  WARN: ${CON} -- 3dClusterize failed; dice_clust=NA" >&2
+                fi
+            fi
+
             for MSPEC in "${MASKS[@]}"; do
                 MTAG=${MSPEC%%:*}
                 M=${MSPEC#*:}
@@ -465,15 +566,24 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 SPICC=$(spatial_icc "${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "${M}" "${S1}'[${COEF}]'" "${S2}'[${COEF}]'")
                 add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" beta spatial_icc "${MTAG}" "${SPICC}"
 
-                # Dice overlap of thresholded t-maps
+                # Dice overlap of thresholded t-maps (both empty -> 0, see dice_pair)
+                DICE=NA
                 if [ "${DICE_OK}" -eq 1 ]; then
-                    DICE=$(afni_scalar "dice ${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "3ddot -dodice -mask ${M} ${ACT1} ${ACT2}")
-                else
-                    DICE=NA
+                    read -r DICE _ _ <<< "$(dice_pair "${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "${M}" "${ACT1}" "${ACT2}")"
                 fi
                 add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat dice "${MTAG}" "${DICE}"
 
-                echo "  ${CON} [${MTAG}]: r(beta)=${R_BETA} r(t)=${R_TSTAT} sICC=${SPICC} dice=${DICE}"
+                # Cluster-corrected Dice + suprathreshold voxel counts per session
+                # (so empty maps -- no surviving cluster -- are visible in the TSV).
+                DICEC=NA; NC1=NA; NC2=NA
+                if [ "${CLUST_OK}" -eq 1 ]; then
+                    read -r DICEC NC1 NC2 <<< "$(dice_pair "clust ${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "${M}" "${CL1}" "${CL2}")"
+                fi
+                add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat dice_clust "${MTAG}" "${DICEC}"
+                add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat clust_nvox_${SES1} "${MTAG}" "${NC1}"
+                add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat clust_nvox_${SES2} "${MTAG}" "${NC2}"
+
+                echo "  ${CON} [${MTAG}]: r(beta)=${R_BETA} r(t)=${R_TSTAT} sICC=${SPICC} dice=${DICE} dice_clust=${DICEC} (nvox ${NC1}/${NC2})"
             done
 
             # --- scatter data (paired beta values, whole-brain) for plotting ---
@@ -562,7 +672,7 @@ for TASK in "${TASKS[@]}"; do
 
         # Group mask: full coverage of the inputs, intersected with the group
         # mean_response activation ROI when available.
-        GMASK=${GROUP_OUT}/groupmask_task-${TASK}.nii.gz
+        GMASK=${GROUP_OUT}/groupmask_task-${TASK}_${CON}.nii.gz
         rm -f "${GMASK}"
         ${AFNI} "3dmask_tool -overwrite -input ${GROUP_OUT}/inputs/*_task-${TASK}_${CON}_Coef.nii.gz -frac 1.0 -prefix ${GMASK}"
         MEMA_MEAN=${GROUP_MEMA}/mema_${TASK}_mean+tlrc
@@ -572,9 +682,9 @@ for TASK in "${TASKS[@]}"; do
                 ${AFNI} "
                     3dcalc -overwrite -a ${MEMA_MEAN}'[1]' -expr 'step(abs(a)-${GATHR})' -prefix ${GROUP_OUT}/.gact.nii.gz
                     3dresample -overwrite -master ${GMASK} -rmode NN -prefix ${GROUP_OUT}/.gact_rs.nii.gz -input ${GROUP_OUT}/.gact.nii.gz
-                    3dmask_tool -overwrite -input ${GMASK} ${GROUP_OUT}/.gact_rs.nii.gz -inter -prefix ${GROUP_OUT}/groupmask_act_task-${TASK}.nii.gz
+                    3dmask_tool -overwrite -input ${GMASK} ${GROUP_OUT}/.gact_rs.nii.gz -inter -prefix ${GROUP_OUT}/groupmask_act_task-${TASK}_${CON}.nii.gz
                 "
-                [ -f "${GROUP_OUT}/groupmask_act_task-${TASK}.nii.gz" ] && GMASK=${GROUP_OUT}/groupmask_act_task-${TASK}.nii.gz
+                [ -f "${GROUP_OUT}/groupmask_act_task-${TASK}_${CON}.nii.gz" ] && GMASK=${GROUP_OUT}/groupmask_act_task-${TASK}_${CON}.nii.gz
             fi
         fi
 
@@ -597,6 +707,120 @@ for TASK in "${TASKS[@]}"; do
         echo "  ICC map -> ${ICC_OUT}+tlrc   median ICC (in mask) = ${MED}"
     done
 done
+
+# =============================================================================
+# WITHIN- vs BETWEEN-SUBJECT DICE  (Gorgolewski et al. 2013, NeuroImage 69:231)
+# =============================================================================
+# A within-subject Dice only means something relative to how much ANY two people
+# overlap (everyone activates visual cortex). Following Gorgolewski et al.:
+#   within  = subject X ses-1 vs subject X ses-2
+#   between = every pair of DIFFERENT subjects, within the same session
+#             (ses-1 pairs and ses-2 pairs), later averaged per task
+# A task is "reliable" at the individual level if within > between. The test
+# (percentile bootstrap of the Harrell-Davis median) is in
+# dice_within_vs_between.R, which reads the TSV written here.
+#
+# All comparisons for a task use ONE common mask (intersection of every
+# subject's mask_both; optionally ∩ the group activation ROI), so within and
+# between Dice are computed over the same voxels. That is why these within values
+# can differ slightly from the per-subject `dice` rows above, which use each
+# subject's own mask. Done for both binary-map variants: p05 (act_*) and
+# clust (clust_*). Both-empty pairs score 0, as in dice_pair.
+# =============================================================================
+echo "=============================================================="
+echo "WITHIN vs BETWEEN-SUBJECT DICE (Gorgolewski et al. 2013)"
+echo "=============================================================="
+
+DICE_WB=${REPRO_OUT}/dice_within_between.tsv
+printf 'task\tcontrast\tvariant\tmask\tkind\tsession\tsubjA\tsubjB\tdice\n' > "${DICE_WB}"
+WB_DIR=${REPRO_OUT}/group/dice_wb
+mkdir -p "${WB_DIR}"
+
+# Runs INSIDE the container: one AFNI process per comparison instead of one
+# container start per comparison (thousands of pairs at n=10).
+#   input lines : kind session subjA subjB fileA fileB
+#   output lines: kind session subjA subjB dice
+DICE_BATCH=${WB_DIR}/dice_batch.sh
+cat > "${DICE_BATCH}" <<'EOF'
+#!/bin/bash
+mask=$1
+while read -r kind ses sa sb fa fb; do
+    if [ ! -f "${fa}" ] || [ ! -f "${fb}" ]; then
+        echo "${kind} ${ses} ${sa} ${sb} NA"; continue
+    fi
+    na=$(3dBrickStat -mask "${mask}" -non-zero -count "${fa}" 2>/dev/null | awk '{print $1}')
+    nb=$(3dBrickStat -mask "${mask}" -non-zero -count "${fb}" 2>/dev/null | awk '{print $1}')
+    if [ "${na}" = 0 ] && [ "${nb}" = 0 ]; then
+        d=0
+    else
+        d=$(3ddot -dodice -mask "${mask}" "${fa}" "${fb}" 2>/dev/null | awk '{print $1}')
+    fi
+    echo "${kind} ${ses} ${sa} ${sb} ${d:-NA}"
+done < "$2"
+EOF
+
+for TASK in "${TASKS[@]}"; do
+    WB_SUBS=()
+    for d in "${REPRO_OUT}"/sub-*/task-${TASK}; do
+        [ -f "${d}/mask_both.nii.gz" ] && WB_SUBS+=("$(basename "$(dirname "${d}")")")
+    done
+    n=${#WB_SUBS[@]}
+    if [ "${n}" -lt 2 ]; then
+        echo "within/between ${TASK}: only ${n} subject(s) -> skip (need >=2 for a between pair)"
+        continue
+    fi
+    echo "within/between ${TASK}: n=${n} (${WB_SUBS[*]})"
+
+    # Common whole-brain mask, and its intersection with the group activation ROI.
+    WB_MASK=${WB_DIR}/mask_wholebrain_task-${TASK}.nii.gz
+    WB_INPUTS=""
+    for sid in "${WB_SUBS[@]}"; do WB_INPUTS="${WB_INPUTS} ${REPRO_OUT}/${sid}/task-${TASK}/mask_both.nii.gz"; done
+    ${AFNI} "3dmask_tool -overwrite -input ${WB_INPUTS} -frac 1.0 -prefix ${WB_MASK}" >/dev/null 2>&1
+    WB_MASKS=("wholebrain:${WB_MASK}")
+    MEMA_MEAN=${GROUP_MEMA}/mema_${TASK}_mean+tlrc
+    if [ -f "${MEMA_MEAN}.HEAD" ]; then
+        WATHR=$(${AFNI} "p2dsetstat -quiet -inset ${MEMA_MEAN}'[1]' -pval ${ACT_PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
+        if [ -n "${WATHR}" ]; then
+            WA_MASK=${WB_DIR}/mask_activation_task-${TASK}.nii.gz
+            ${AFNI} "
+                3dcalc -overwrite -a ${MEMA_MEAN}'[1]' -expr 'step(abs(a)-${WATHR})' -prefix ${WB_DIR}/.wact.nii.gz
+                3dresample -overwrite -master ${WB_MASK} -rmode NN -prefix ${WB_DIR}/.wact_rs.nii.gz -input ${WB_DIR}/.wact.nii.gz
+                3dmask_tool -overwrite -input ${WB_MASK} ${WB_DIR}/.wact_rs.nii.gz -inter -prefix ${WA_MASK}
+            " >/dev/null 2>&1
+            [ -f "${WA_MASK}" ] && WB_MASKS=("activation:${WA_MASK}" "${WB_MASKS[@]}")
+        fi
+    fi
+
+    for CON in "${CONTRASTS[@]}"; do
+        for VAR in p05 clust; do
+            case "${VAR}" in p05) MAPPRE=act ;; clust) MAPPRE=clust ;; esac
+            LIST=${WB_DIR}/.pairs_${TASK}_${CON}_${VAR}.txt
+            : > "${LIST}"
+            for ((i = 0; i < n; i++)); do
+                si=${WB_SUBS[i]}
+                Di=${REPRO_OUT}/${si}/task-${TASK}
+                echo "within ${SES1//-/}-${SES2//-/} ${si} ${si} ${Di}/${MAPPRE}_${SES1}_${CON}.nii.gz ${Di}/${MAPPRE}_${SES2}_${CON}.nii.gz" >> "${LIST}"
+                for ((j = i + 1; j < n; j++)); do
+                    sj=${WB_SUBS[j]}
+                    Dj=${REPRO_OUT}/${sj}/task-${TASK}
+                    for SES in "${SES1}" "${SES2}"; do
+                        echo "between ${SES//-/} ${si} ${sj} ${Di}/${MAPPRE}_${SES}_${CON}.nii.gz ${Dj}/${MAPPRE}_${SES}_${CON}.nii.gz" >> "${LIST}"
+                    done
+                done
+            done
+            for MSPEC in "${WB_MASKS[@]}"; do
+                MTAG=${MSPEC%%:*}
+                M=${MSPEC#*:}
+                ${AFNI} "bash ${DICE_BATCH} ${M} ${LIST}" 2>/dev/null \
+                    | awk -v t="${TASK}" -v c="${CON}" -v v="${VAR}" -v m="${MTAG}" \
+                        'NF==5 { printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", t, c, v, m, $1, $2, $3, $4, $5 }' >> "${DICE_WB}"
+            done
+            rm -f "${LIST}"
+        done
+    done
+done
+echo "  within/between Dice -> ${DICE_WB}"
+echo "  test it with: Rscript dice_within_vs_between.R ${DICE_WB}"
 
 echo "=============================================================="
 echo "Reliability run complete."
