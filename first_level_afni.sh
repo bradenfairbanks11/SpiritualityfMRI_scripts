@@ -40,15 +40,16 @@
 # Runs with no usable ratings have NO timing file and are skipped automatically
 # (e.g. 0AK1RT ses-1 task-FHS).
 #
-# KNOWN LIMITATION -- unrated trials are UNMODELED (they end up in the baseline):
-# generate_timing_files.py drops every trial with no button press (or an invalid
-# rating), so those stimuli get no regressor here. The participant still SAW them,
-# so their BOLD response is absorbed by the baseline/residual instead of being
-# explained. That raises the baseline the rated trials are compared against,
-# biasing mean_response (and to a lesser degree rating_slope) toward zero, more
-# so in runs with many missed responses. Not fixed as of 2026-10-20. The fix:
-# write the unrated onsets to a second timing file in generate_timing_files.py
-# and add them here as a separate nuisance regressor (-stim_times, not AM).
+# UNRATED TRIALS (no button press) -- modeled as a NUISANCE regressor (2026-10-20):
+# a trial with no valid rating cannot go in the AM file (nothing to modulate by),
+# but the participant still SAW it. Until 2026-10-20 such trials were simply left
+# out, so their BOLD response fell into the baseline and biased mean_response
+# (and to a lesser degree rating_slope) toward zero. generate_timing_files.py now
+# writes their onsets to byv-<BYV>_<ses>_task-<TASK>_unrated.1D, and when that
+# file exists the GLM adds them as stimulus 2 ('unrated', same BLOCK duration).
+# The file is absent when a run has no unrated trials; the GLM then has one
+# stimulus, exactly as before. The unrated betas are NOT a result -- the GLTs
+# below only use rating[0] / rating[1].
 #
 # Participant mapping: BIDS uses sub-NN (assigned by scan-date order in
 # dcm2niix), but timing files are keyed by the BYV alphanumeric ID. The script
@@ -199,6 +200,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             BOLD_IN=${TEDANA_FUNC}/${PARTICIPANT_ID}_${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
             CONFOUNDS=${FMRIPREP_OUT}/${PARTICIPANT_ID}/${SES}/func/${PARTICIPANT_ID}_${SES}_task-${TASK}_desc-confounds_timeseries.tsv
             TIMING=${TIMING_DIR}/byv-${BYV}_${SES}_task-${TASK}_ratingAM.1D
+            UNRATED=${TIMING_DIR}/byv-${BYV}_${SES}_task-${TASK}_unrated.1D
             MASK=${FMRIPREP_OUT}/${PARTICIPANT_ID}/${SES}/func/${PARTICIPANT_ID}_${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz
 
             if [ ! -f "${BOLD_IN}" ]; then
@@ -323,7 +325,19 @@ with open('${CONFOUNDS}') as f:
             #   rating[1] = parametric slope (mean-centered rating; the result)
             # BLOCK(${BLOCK_DUR},1) = fixed boxcar HRF, peak normalized to 1 so
             # betas are in percent signal change.
+            # Stimulus 2 'unrated' (only if the run has unrated trials): plain
+            # -stim_times nuisance regressor, see header. It cannot be marked
+            # -stim_base (3dDeconvolve forbids that with -stim_times), so its
+            # unrated#0 sub-bricks appear in the bucket; downstream selects
+            # sub-bricks by label, so nothing else changes.
             # ------------------------------------------------------------------
+            NSTIM=1
+            UNRATED_OPTS=""
+            if [ -f "${UNRATED}" ]; then
+                NSTIM=2
+                UNRATED_OPTS="-stim_times 2 ${UNRATED} 'BLOCK(${BLOCK_DUR},1)' -stim_label 2 unrated"
+                echo "  + unrated nuisance regressor: $(wc -w < "${UNRATED}" | tr -d ' ') trial(s)"
+            fi
             ${AFNI} "
                 cd ${OUT_DIR}
 
@@ -334,12 +348,13 @@ with open('${CONFOUNDS}') as f:
                     -TR_times ${TR} \
                     -censor ${OUT_DIR}/${PREFIX}_motion_censor.1D \
                     \
-                    -num_stimts 1 \
+                    -num_stimts ${NSTIM} \
                     \
                     -ortvec ${OUT_DIR}/${PREFIX}_motion_demean.txt motion \
                     \
                     -stim_times_AM2 1 ${TIMING} 'BLOCK(${BLOCK_DUR},1)' \
                         -stim_label 1 rating \
+                    ${UNRATED_OPTS} \
                     \
                     -num_glt 2 \
                     -gltsym 'SYM: rating[0]' -glt_label 1 mean_response \

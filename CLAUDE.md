@@ -52,7 +52,9 @@ this project, or the derivatives — 10–12 h of fMRIPrep per subject — are d
   raw data on archive, containers and timing files on home. A single-root bind fails
   *silently* inside the container.
 - **Timing files cannot be regenerated on the cluster.** `generate_timing_files.py` runs on
-  Braden's local machine. New `*_ratingAM.1D` files go straight to `~/spirituality_fmri/timing/`.
+  Braden's local machine. New `*_ratingAM.1D` **and `*_unrated.1D`** files go straight to
+  `~/spirituality_fmri/timing/` (upload the whole folder; a missing `_unrated.1D` silently
+  puts that run's no-response trials back into the baseline).
   `first_level_afni.sh` silently skips runs with no timing file, so a missing one looks like
   a clean run that did nothing.
 - **Compute nodes have no internet.** Any pip/R install must be done from a login node. This

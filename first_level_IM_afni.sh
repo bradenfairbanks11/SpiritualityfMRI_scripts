@@ -35,12 +35,11 @@
 #
 # Trials and ratings come from the SAME *_ratingAM.1D timing file ("onset*rating",
 # sorted by onset), so the trial set is exactly the AM model's trial set.
-# NOTE: trials with no button press were dropped by generate_timing_files.py and
-# are unmodeled here too (same as the AM GLM) -- they sit in the baseline. This
-# is a pre-existing limitation, not something this script introduces; see the
-# KNOWN LIMITATION note in first_level_afni.sh for the bias and the fix. Unrated
-# trials could not go into the low/high split anyway (no rating to split on), but
-# they should still get their own nuisance regressor.
+# Trials with no button press have no rating, so they are not in the AM file and
+# get no trial beta (nothing to split low/high on). They are still modeled: when
+# byv-<BYV>_<ses>_task-<TASK>_unrated.1D exists they enter as one nuisance
+# regressor, exactly as in first_level_afni.sh, so their response does not fall
+# into the baseline. Its beta is trimmed from the output (see STEP 3).
 #
 # Output, per participant / session / task, in <run dir>/single_trial/:
 #   <PREFIX>_IM_times.1D     onsets only (the IM timing file)
@@ -146,6 +145,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             MOTION=${RUN_DIR}/${PREFIX}_motion_demean.txt
             CENSOR=${RUN_DIR}/${PREFIX}_motion_censor.1D
             TIMING=${TIMING_DIR}/byv-${BYV}_${SES}_task-${TASK}_ratingAM.1D
+            UNRATED=${TIMING_DIR}/byv-${BYV}_${SES}_task-${TASK}_unrated.1D
             MASK=${FMRIPREP_OUT}/${PARTICIPANT_ID}/${SES}/func/${PARTICIPANT_ID}_${SES}_task-${TASK}_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz
 
             missing=""
@@ -192,7 +192,16 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             # STEP 2: design matrix with one regressor per trial. Same nuisance
             # model as first_level_afni.sh (polort A, Friston-24 ortvec, FD
             # censor). -x1D_stop: 3dREMLfit does the actual fit.
+            # Stimulus 2 'unrated' = no-response trials as one nuisance regressor
+            # (only if the run has any), same as first_level_afni.sh.
             # ------------------------------------------------------------------
+            NSTIM=1
+            UNRATED_OPTS=""
+            if [ -f "${UNRATED}" ]; then
+                NSTIM=2
+                UNRATED_OPTS="-stim_times 2 ${UNRATED} 'BLOCK(${BLOCK_DUR},1)' -stim_label 2 unrated"
+                echo "  + unrated nuisance regressor: $(wc -w < "${UNRATED}" | tr -d ' ') trial(s)"
+            fi
             ${AFNI} "
                 cd ${OUT_DIR}
 
@@ -202,11 +211,12 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                     -polort A \
                     -TR_times ${TR} \
                     -censor ${CENSOR} \
-                    -num_stimts 1 \
+                    -num_stimts ${NSTIM} \
                     -ortvec ${MOTION} motion \
                     -local_times \
                     -stim_times_IM 1 ${TIMES} 'BLOCK(${BLOCK_DUR},1)' \
                         -stim_label 1 trial \
+                    ${UNRATED_OPTS} \
                     -x1D ${OUT_DIR}/${PREFIX}_IM_xmat.1D \
                     -xjpeg ${OUT_DIR}/${PREFIX}_IM_xmat.jpg \
                     -x1D_stop
@@ -214,22 +224,32 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
 
             # ------------------------------------------------------------------
             # STEP 3: REML fit (ARMA(1,1) noise, like the AM GLM). -nobout drops
-            # baseline + motion betas, so -Rbeta holds exactly one sub-brick per
-            # trial, labelled trial#0 .. trial#N-1 (verified on synthetic data).
-            # trr_export_afni.sh later splits these into one file per trial.
+            # baseline + motion betas, so -Rbeta holds trial#0 .. trial#N-1,
+            # followed by unrated#0 when the unrated regressor is present
+            # (verified on synthetic data). Only the N trial sub-bricks are kept
+            # in _IM_betas, and their labels are checked, so sub-brick k is
+            # always trial k of the table. trr_export_afni.sh later splits them
+            # into one file per trial.
             # ------------------------------------------------------------------
+            rm -f "${OUT_DIR:?}/${PREFIX:?}"_IM_betas+tlrc.* "${OUT_DIR:?}/${PREFIX:?}"_IM_allbetas+tlrc.*
             ${AFNI} "
                 3dREMLfit \
                     -matrix ${OUT_DIR}/${PREFIX}_IM_xmat.1D \
                     -input  ${SCALED} \
                     -mask   ${MASK} \
                     -nobout \
-                    -Rbeta  ${OUT_DIR}/${PREFIX}_IM_betas
+                    -Rbeta  ${OUT_DIR}/${PREFIX}_IM_allbetas
+
+                3dbucket -prefix ${OUT_DIR}/${PREFIX}_IM_betas \
+                    ${OUT_DIR}/${PREFIX}_IM_allbetas+tlrc'[0..$((NTRIAL - 1))]'
             "
+            rm -f "${OUT_DIR:?}/${PREFIX:?}"_IM_allbetas+tlrc.*
 
             NV=$(${AFNI} "3dinfo -nv ${OUT_DIR}/${PREFIX}_IM_betas+tlrc" 2>/dev/null | tail -n1)
-            if [ "${NV}" != "${NTRIAL}" ]; then
-                echo "ERROR: ${PREFIX}_IM_betas has ${NV} sub-bricks but ${NTRIAL} trials -- trial table would be misaligned." >&2
+            NLAB=$(${AFNI} "3dinfo -label ${OUT_DIR}/${PREFIX}_IM_betas+tlrc" 2>/dev/null | tail -n1 \
+                | tr '|' '\n' | awk '$0 == "trial#" (NR - 1)' | wc -l | tr -d ' ')
+            if [ "${NV}" != "${NTRIAL}" ] || [ "${NLAB}" != "${NTRIAL}" ]; then
+                echo "ERROR: ${PREFIX}_IM_betas has ${NV} sub-bricks (${NLAB} labelled trial#0..) but ${NTRIAL} trials -- trial table would be misaligned." >&2
                 exit 1
             fi
 
