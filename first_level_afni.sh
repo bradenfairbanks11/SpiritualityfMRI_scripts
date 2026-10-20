@@ -40,6 +40,16 @@
 # Runs with no usable ratings have NO timing file and are skipped automatically
 # (e.g. 0AK1RT ses-1 task-FHS).
 #
+# KNOWN LIMITATION -- unrated trials are UNMODELED (they end up in the baseline):
+# generate_timing_files.py drops every trial with no button press (or an invalid
+# rating), so those stimuli get no regressor here. The participant still SAW them,
+# so their BOLD response is absorbed by the baseline/residual instead of being
+# explained. That raises the baseline the rated trials are compared against,
+# biasing mean_response (and to a lesser degree rating_slope) toward zero, more
+# so in runs with many missed responses. Not fixed as of 2026-10-20. The fix:
+# write the unrated onsets to a second timing file in generate_timing_files.py
+# and add them here as a separate nuisance regressor (-stim_times, not AM).
+#
 # Participant mapping: BIDS uses sub-NN (assigned by scan-date order in
 # dcm2niix), but timing files are keyed by the BYV alphanumeric ID. The script
 # resolves sub-NN -> BYV via participants.tsv (see PARTICIPANTS_TSV).

@@ -36,7 +36,11 @@
 # Trials and ratings come from the SAME *_ratingAM.1D timing file ("onset*rating",
 # sorted by onset), so the trial set is exactly the AM model's trial set.
 # NOTE: trials with no button press were dropped by generate_timing_files.py and
-# are unmodeled here too (same as the AM GLM) -- they sit in the baseline.
+# are unmodeled here too (same as the AM GLM) -- they sit in the baseline. This
+# is a pre-existing limitation, not something this script introduces; see the
+# KNOWN LIMITATION note in first_level_afni.sh for the bias and the fix. Unrated
+# trials could not go into the low/high split anyway (no rating to split on), but
+# they should still get their own nuisance regressor.
 #
 # Output, per participant / session / task, in <run dir>/single_trial/:
 #   <PREFIX>_IM_times.1D     onsets only (the IM timing file)
