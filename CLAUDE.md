@@ -22,7 +22,7 @@ request > general agent defaults.
 
 Braden's rule: every analysis script must be readable on its own (for writing the methods
 paper), so dcm2niix.sh, first_level_afni.sh, first_level_IM_afni.sh, second_level_afni.sh,
-trr_export_afni.sh, reproducibility_afni.sh and check_trial_censoring.sh define every path
+trr_export_afni.sh, reproducibility_afni.sh, reliability_models_afni.sh and check_trial_censoring.sh define every path
 and parameter in their own SECTION 1 and do NOT source config.sh. Settings used by more than
 one script carry a trailing `# [shared]` and must be byte-identical across copies: after
 changing one, edit every copy and run `bash check_settings.sh` (exits 1 on any mismatch).
@@ -104,7 +104,9 @@ Multi-echo fMRI, parametric "felt the Spirit" rating GLM (AFNI `-stim_times_AM2`
 Trial-level reliability branch (added 2026-10-20): `first_level_IM_afni.sh` (one beta per
 trial via `-stim_times_IM`, reusing first_level_afni.sh's scaled data + motion files) →
 `trr_export_afni.sh` (per-trial NIfTIs, data tables, group-cluster ROIs into `${TRR_OUT}`) →
-copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.sh`.
+`reliability_models_afni.sh` (cluster, inside the AFNI image: 3dLMEr -TRR as
+`sbatch --array=0-3 ... trr_vox`, one model per array task; then `... trr_roi dice`).
+It replaced the Mac-only `local_r_steps.sh` on 2026-10-24, once the new image could run R.
 
 - **TRR conditions are stimulus labels (since 2026-10-24), not the rating split.**
   `stimulus_conditions.tsv` (repo; copy to `~/spirituality_fmri/scripts/`) labels every stimulus
@@ -112,7 +114,7 @@ copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.s
   RTF in Box `data/Inter-session_behavioral_ICC_results/high_yield_stimuli/`) and, for
   architecture, faith = lds/other (file-name prefix). trr_export_afni.sh joins each trial to
   its stimulus via `_IM_trials.tsv` orig_trial = row of `<timing>/byv-*_stimuli.tsv` (onsets
-  must match, else the task stops). local_r_steps.sh `TRR_VOX_RUNS` runs 3dLMEr -TRR for
+  must match, else the task stops). reliability_models_afni.sh `TRR_VOX_RUNS` runs 3dLMEr -TRR for
   scripture/FHS/architecture yield + architecture faith. Scanner check (2026-10-24): yield
   separates in-scanner ratings strongly for scripture/FHS (~1.4-1.9 points, every subject) but
   weakly for architecture (+0.25-0.6), where only the LDS images follow the survey.
@@ -151,12 +153,13 @@ copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.s
 - **trr_export_afni.sh mask_task-T = non-zero single-trial beta for every trial of every included
   run** (3dmask_tool -frac 1.0 on the _IM_betas buckets; since 2026-10-24, was the intersection of
   fMRIPrep brain masks). Used as the 3dLMEr -TRR mask and the 3dClusterize search mask for ROIs.
-- 3dICC now runs on the cluster inside `reproducibility_afni.sh`. `3dLMEr -TRR` and `TRR`
-  are still run via `local_r_steps.sh` (Mac) — not yet tested on the cluster image.
+- 3dICC runs on the cluster inside `reproducibility_afni.sh`; `3dLMEr -TRR`, `TRR` and the
+  Dice test run in `reliability_models_afni.sh`. None of these R steps has run on real data in
+  the new image yet.
 - **`3dLMEr -TRR` hard-codes exactly 2 conditions × 2 sessions** (`runTRR` in 3dLMEr.R).
-  Trials are split by rating: low = 1–2, high = 3–4 (`HIGH_MIN` in first_level_IM_afni.sh).
-  FHS is excluded from the voxelwise run (too few high-rated trials); region-level `TRR`
-  handles a single condition and covers all three tasks.
+  The conditions are stimulus labels (yield, faith; see above). The old rating split
+  (`HIGH_MIN`, low = 1–2, high = 3–4) is still written to `_IM_trials.tsv` for reference only.
+  Region-level `TRR` handles a single condition and covers all three tasks.
 - **AFNI's TRR.R pre-sizes its posterior vector to 2000 draws.** Keep
   chains × iterations / 2 ≥ 2000 or the reported TRR is biased toward 0.
 - `dice_clust` = cluster-corrected Dice (voxel p<.001, per-session ACF 3dClustSim, α=.05).

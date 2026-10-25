@@ -4,7 +4,8 @@
 #
 # *** As of 2026-10-24 most scripts NO LONGER read this file. ***
 # dcm2niix.sh, first_level_afni.sh, first_level_IM_afni.sh, second_level_afni.sh,
-# trr_export_afni.sh, reproducibility_afni.sh and check_trial_censoring.sh carry
+# trr_export_afni.sh, reproducibility_afni.sh, reliability_models_afni.sh and
+# check_trial_censoring.sh carry
 # their own settings (marked "# [shared]"); check_settings.sh confirms they agree.
 # Still sourced by: fmriprep_tedana.sh, tedana_only.sh, promote_to_archive.sh
 # (and the obsolete setup_rlib.sh). If you change a path here, change the matching
@@ -72,7 +73,7 @@ export AFNI_OUT=${DERIV}/afni_firstlvl
 export REPRO_OUT=${DERIV}/afni_reproducibility
 export GROUP_OUT=${DERIV}/afni_group
 # Single-trial (-stim_times_IM) exports for trial-level TRR (trr_export_afni.sh).
-# Self-contained: copy this whole folder to the local machine for local_r_steps.sh.
+# Read by reliability_models_afni.sh (3dLMEr -TRR, TRR) on the cluster.
 export TRR_OUT=${DERIV}/afni_trr
 export BIDS_FILTER_DIR=${DERIV}/bids_filters
 export WORK_ROOT=${SCRATCH_ROOT}/work/${PROJECT_NAME}

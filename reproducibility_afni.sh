@@ -107,9 +107,9 @@
 #   Before: first_level_afni.sh   (the per-session GLM results compared here)
 #           second_level_afni.sh  (the group mean_response map used for the
 #                                  activation mask; optional)
-#   After : dice_within_vs_between.R  (tests within- vs between-person Dice)
-#           local_r_steps.sh          (copies of afni_reproducibility/ are used
-#                                      on the Mac)
+#   After : reliability_models_afni.sh dice  (runs dice_within_vs_between.R,
+#                                             which tests within- vs
+#                                             between-person Dice)
 #
 # STEPS
 #   LEVEL 1, for each participant x task (SECTION 4):
@@ -172,7 +172,8 @@
 #   The arguments only limit LEVEL 1. The group ICC (SECTION 5) and the
 #   within/between Dice (SECTION 6) always use every participant on disk.
 #   Re-running replaces that participant's rows in reproducibility_summary.tsv.
-#   Afterwards:  Rscript dice_within_vs_between.R <REPRO_OUT>/dice_within_between.tsv
+#   Afterwards:  sbatch reliability_models_afni.sh dice
+#                (runs dice_within_vs_between.R on dice_within_between.tsv)
 #
 # METHODS SUMMARY (the exact values used below)
 #   Data           : first-level 3dREMLfit outputs (first_level_afni.sh) for

@@ -42,13 +42,13 @@
 #       mean_response map from second_level_afni.sh,
 #     - a table of each trial's mean beta in each ROI.
 #   It only splits and summarizes files (AFNI C programs, no R). The R steps
-#   (3dLMEr -TRR, TRR) are run on the local Mac by local_r_steps.sh.
+#   (3dLMEr -TRR, TRR) are run by reliability_models_afni.sh.
 #
 # WHERE IT SITS IN THE PIPELINE
 #   Before: first_level_IM_afni.sh  (single-trial betas + trial tables)
 #           second_level_afni.sh    (group mean_response 3dMEMA maps + the
 #                                    3dClustSim cluster-size table)
-#   After : copy the whole TRR_OUT folder to the local Mac -> local_r_steps.sh
+#   After : reliability_models_afni.sh  (3dLMEr -TRR and TRR on these files)
 #
 # STEPS, PER TASK
 #   (once, before the tasks) read the cluster-size threshold from the
@@ -84,7 +84,7 @@
 #                                                  (NNN = 0-based trial number)
 #   trials_task-<T>.tsv        Subj sess trial rating cond stimulus yield faith InputFile
 #                              -> the source of the 3dLMEr -TRR data tables
-#                              (local_r_steps.sh picks the condition column)
+#                              (reliability_models_afni.sh picks the condition column)
 #   mask_task-<T>.nii.gz       voxels with a non-zero beta for every trial of
 #                              every included run
 #   rois_task-<T>.nii.gz       ROI map: cluster 1 = largest, 2 = next, ...
@@ -460,7 +460,7 @@ done
 
 echo "=============================================================="
 echo "TRR export complete: ${TRR_OUT}"
-echo "Copy the WHOLE folder to the local machine, e.g. from the local machine:"
-echo "    rsync -av <cluster>:${TRR_OUT}/ <local>/afni_trr/"
-echo "then run local_r_steps.sh there."
+echo "Next: the R models, e.g."
+echo "    sbatch --array=0-3 reliability_models_afni.sh trr_vox"
+echo "    sbatch reliability_models_afni.sh trr_roi dice"
 echo "=============================================================="
