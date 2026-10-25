@@ -24,6 +24,14 @@
 # =============================================================================
 set -uo pipefail
 
+# *** OBSOLETE since 2026-10-24. ***
+# This propped up the OLD AFNI image (R 3.4.4) with a personal R library. The
+# current image (config.sh AFNI_SIF = /apps/afni/26.3.04.sif) carries every R
+# package inside it, and the pipeline no longer reads ${RLIB}. Kept for history.
+echo "setup_rlib.sh is obsolete: the AFNI image in config.sh ships its own R packages."
+echo "Nothing to do."
+exit 0
+
 # --- Locate config.sh ---------------------------------------------------------
 # Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
 # (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
@@ -69,8 +77,14 @@ echo "library : ${RLIB}"
 echo "packages: ${PKGS}"
 echo
 
+# The AFNI container ships R 3.4.4 (2018). Current CRAN lme4/blme/metafor need a
+# newer R and Matrix than the container's 1.2-12, so their installs fail there.
+# A dated Posit Package Manager snapshot serves versions from when R 3.4 was
+# current. Packages already installed (data.table, snow, irr) are left alone.
+CRAN_SNAPSHOT=${CRAN_SNAPSHOT:-https://packagemanager.posit.co/cran/2019-01-15}
+
 ${R_IN_AFNI} "Rscript -e '
-  options(repos = c(CRAN = \"https://cloud.r-project.org\"))
+  options(repos = c(CRAN = \"${CRAN_SNAPSHOT}\"))
   want    <- ${PKGS}
   lib     <- Sys.getenv(\"R_LIBS_USER\")
   missing <- setdiff(want, rownames(installed.packages()))

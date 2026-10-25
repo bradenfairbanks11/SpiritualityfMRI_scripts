@@ -18,10 +18,20 @@ Those instructions outrank this file. The stated priority order is:
 ORC policy and administrator instructions > `BYU_ORC_AGENTS.md` > this file > the user's
 request > general agent defaults.
 
-## Storage tiers — read `config.sh` before touching any path
+## Settings live INSIDE each script (since 2026-10-24) — and must agree
 
-Every path in this pipeline comes from `config.sh`. Do not hardcode paths in scripts; add
-them there. The tiers:
+Braden's rule: every analysis script must be readable on its own (for writing the methods
+paper), so dcm2niix.sh, first_level_afni.sh, first_level_IM_afni.sh, second_level_afni.sh,
+trr_export_afni.sh, reproducibility_afni.sh and check_trial_censoring.sh define every path
+and parameter in their own SECTION 1 and do NOT source config.sh. Settings used by more than
+one script carry a trailing `# [shared]` and must be byte-identical across copies: after
+changing one, edit every copy and run `bash check_settings.sh` (exits 1 on any mismatch).
+Layout every script follows (first_level_afni.sh is the template): SLURM box → header
+(what / pipeline position / steps / inputs / outputs / how to run / METHODS SUMMARY) →
+SECTION 1 settings → 2 helpers → 3 setup/checks → 4 main steps, each step boxed and explained
+in plain language. Keep new scripts and edits in that style.
+`config.sh` is still sourced by fmriprep_tedana.sh, tedana_only.sh and promote_to_archive.sh
+(Braden chose to leave those three as they are). The storage tiers:
 
 | Tier | Purpose | Policy |
 |---|---|---|
@@ -45,9 +55,9 @@ this project, or the derivatives — 10–12 h of fMRIPrep per subject — are d
   (`/var/spool/slurmd/job<N>/slurm_script`) — not at this repo. Verified 2026-08-21
   with probe job 13292417. Earlier guidance here said `${BASH_SOURCE[0]}` was the fix
   for `$0`; it is not, and every directly-submitted job script died on its
-  `source config.sh` line until this was corrected. Use the `CONFIG=""` resolver
-  block the scripts now carry: `$PIPELINE_CONFIG`, then `$SLURM_SUBMIT_DIR`, then
-  `dirname ${BASH_SOURCE[0]}` (right only when run with `bash`), then the install path.
+  `source config.sh` line until this was corrected. Scripts that still source config.sh
+  use the `CONFIG=""` resolver block; self-contained scripts use literal absolute paths
+  (e.g. exclusions.tsv at /home/bradenf4/spirituality_fmri/scripts/exclusions.tsv).
 - **Apptainer `--bind` must span all three tiers** (`${BIND_ARGS}`). Inputs are on scratch,
   raw data on archive, containers and timing files on home. A single-root bind fails
   *silently* inside the container.
@@ -57,10 +67,11 @@ this project, or the derivatives — 10–12 h of fMRIPrep per subject — are d
   puts that run's no-response trials back into the baseline).
   `first_level_afni.sh` silently skips runs with no timing file, so a missing one looks like
   a clean run that did nothing.
-- **Compute nodes have no internet.** Any pip/R install must be done from a login node. This
-  is why `RLIB` lives on `/home`.
+- **Compute nodes have no internet.** Any pip/R install must be done from a login node.
+  R packages now live INSIDE the AFNI image (below), so there is nothing to install for R.
 - **`~/.local` poisons every conda env.** A stray numpy there shadowed `tedenv` and broke
-  tedana (`np.row_stack` removed in numpy 2.5). `config.sh` sets `PYTHONNOUSERSITE=1`.
+  tedana (`np.row_stack` removed in numpy 2.5). Every script that runs host Python sets
+  `export PYTHONNOUSERSITE=1`.
 - **Always re-run `assign_fieldmaps.py` after any dcm2niix re-conversion** — dcm2niix writes
   a coarse blanket `IntendedFor` that clobbers per-run fieldmap pairing.
 
@@ -94,10 +105,38 @@ trial via `-stim_times_IM`, reusing first_level_afni.sh's scaled data + motion f
 `trr_export_afni.sh` (per-trial NIfTIs, data tables, group-cluster ROIs into `${TRR_OUT}`) →
 copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.sh`.
 
-- **R-based AFNI programs do not run on the cluster** (3dICC fails in the container), so
-  3dICC, `3dLMEr -TRR` and `TRR` run locally via `local_r_steps.sh`. Cluster scripts must
-  stay pure-AFNI-C for anything new; `reproducibility_afni.sh` still *attempts* 3dICC and
-  records NA, leaving its inputs in `afni_reproducibility/group/` for the local run.
+- **AFNI image: `/apps/afni/26.3.04.sif` (since 2026-10-24).** ORC built it to the spec in
+  `container_request.md`: Ubuntu 24.04, R >= 4.4, every R package inside the image,
+  `R_LIBS_USER=NULL`. R-based AFNI calls use `apptainer exec --cleanenv` so host env cannot
+  override the image's packages. The old image (`afni_make_build_latest.sif`: Ubuntu 18.04,
+  R 3.4.4, AFNI 24.3.01) could not run 3dICC/3dLMEr/TRR; `RLIB`/`setup_rlib.sh` were its
+  workaround and are now unused. Do not mix outputs from the two AFNI versions in one analysis.
+- **Motion censoring = fMRIPrep `framewise_displacement` > 0.3 mm, plus the volume before**
+  (first_level_afni.sh STEP 4, since 2026-10-24; Braden's decision). Before that the code
+  censored at 1d_tool.py euclidean-norm >= 1 on mm + RADIANS (rotations barely counted) while
+  its comment claimed "FD > 0.3mm". Outputs made before 2026-10-24 used the old rule.
+- **All-zero regressors crash 3dREMLfit** ("Cannot continue with all zero column"), and with
+  `set -e` that ends the job for every remaining run. Guarded since 2026-10-24:
+  first_level_IM_afni.sh drops trials with no data left after censoring (signal_kept = censored
+  / uncensored sum of squares, from -x1D vs -x1D_uncensored; MIN_SIGNAL_KEPT=0) and renumbers
+  `_IM_trials.tsv` so row k = sub-brick k (orig_trial keeps the original number);
+  first_level_afni.sh does a -nodata design check, drops a fully censored unrated regressor and
+  skips a run whose rating[0]/rating[1] column is empty. AFNI design-matrix paths must stay
+  under ~250 characters or 3dDeconvolve silently fails to write them.
+- **First-level analysis mask = fMRIPrep brain mask AND extents mask** (smoothed data > 0 at every
+  time point; afni_proc.py applies the same kind of mask by default), saved as
+  `<PREFIX>_analysis_mask.nii.gz` and reused by first_level_IM_afni.sh (since 2026-10-24).
+  `1d_tool.py` ignores AFNI_DECONFLICT, so its output calls need `-overwrite` or re-runs crash.
+- **second_level_afni.sh group mask = non-zero rating_slope AND mean_response betas in EVERY run**
+  that enters the group analysis (per run, not per session-average: STEP 1 averages sessions, so
+  a voxel modelled in one session only would look non-zero). Was one fMRIPrep mask per subject
+  until 2026-10-24, which left data-less zero voxels inside the mask for 3dttest++ (no -zskip).
+- **reproducibility_afni.sh whole-brain mask = non-zero mean_response AND rating_slope betas in
+  both sessions** (since 2026-10-24; was 3dAutomask of tedana BOLD, which did not match the GLM
+  mask and let zero-beta voxels count as agreement in spatial_r/spatial_icc and enter 3dFWHMx /
+  3dClustSim). Group masks elsewhere are already "non-zero in every input" or intersections.
+- 3dICC now runs on the cluster inside `reproducibility_afni.sh`. `3dLMEr -TRR` and `TRR`
+  are still run via `local_r_steps.sh` (Mac) — not yet tested on the cluster image.
 - **`3dLMEr -TRR` hard-codes exactly 2 conditions × 2 sessions** (`runTRR` in 3dLMEr.R).
   Trials are split by rating: low = 1–2, high = 3–4 (`HIGH_MIN` in first_level_IM_afni.sh).
   FHS is excluded from the voxelwise run (too few high-rated trials); region-level `TRR`
@@ -112,8 +151,9 @@ copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.s
 ## Excluded runs — `exclusions.tsv` (added 2026-10-20)
 
 Runs that must not enter ANY analysis are listed in `exclusions.tsv` (byv_id, session,
-task or `*`, reason, date). `config.sh` sources `exclusions.sh`, which provides
-`is_excluded <sub-NN|BYV> <ses> <task>`; every first-level loop and every downstream
+task or `*`, reason, date). Each self-contained script carries its own copy of
+`is_excluded <sub-NN|BYV> <ses> <task>` (marked [shared]; config.sh still sources
+exclusions.sh for the three scripts that use it); every first-level loop and every downstream
 discovery loop (second level, reproducibility, TRR export) calls it. Old outputs of an
 excluded run stay on disk but are ignored. Add new exclusions there with a reason — never
 by deleting timing files (downstream scripts discover from disk, so that does not exclude).

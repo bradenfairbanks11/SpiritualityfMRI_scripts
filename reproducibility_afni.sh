@@ -1,4 +1,16 @@
 #!/bin/bash
+# ==============================================================================
+# SLURM JOB SETTINGS
+# ------------------------------------------------------------------------------
+# Slurm reads these #SBATCH lines BEFORE the script runs, so they must be literal
+# values (shell variables do not expand here).
+#   8 cores / 32 GB / 4 h : one job loops over every participant and task in
+#                           turn, then runs the group steps. The 8 cores are
+#                           used by 3dClustSim (STEP 5) and 3dICC (STEP 11),
+#                           which read the core count from SLURM_CPUS_PER_TASK.
+#   --chdir               : run inside scratch, so any stray relative-path file
+#                           lands there instead of in the home directory.
+# ==============================================================================
 #SBATCH --job-name=spirituality_repro
 #SBATCH --output=/home/bradenf4/spirituality_fmri/logs/%x_%j.out
 #SBATCH --error=/home/bradenf4/spirituality_fmri/logs/%x_%j.err
@@ -9,201 +21,344 @@
 #SBATCH --time=04:00:00
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=bradenfairbanks@gmail.com
-# Run the job in scratch, not the submit dir. #SBATCH is parsed by Slurm before
-# the shell runs, so this must be a literal absolute path -- ${WORK_ROOT} would
-# not expand. Keeps stray relative-path output off /home.
 #SBATCH --chdir=/nobackup/autodelete/usr/bradenf4/work/Spirituality
 
-# =============================================================================
-# Spirituality fMRI — TEST-RETEST RELIABILITY (ses-1 vs ses-2), AFNI
+# ==============================================================================
+# reproducibility_afni.sh — TEST-RETEST RELIABILITY OF THE FIRST-LEVEL MAPS
+#                           (session 1 vs session 2)
+# ==============================================================================
 #
-# Quantifies reproducibility at TWO levels, and does NOT re-run any GLM (it
-# consumes the _stats_REML buckets from first_level_afni.sh, so GLM settings are
-# identical by construction).
+# WHAT THIS SCRIPT DOES
+#   Every participant is scanned twice (ses-1 and ses-2) on the same three
+#   tasks. This script asks: how similar are a person's brain maps from the two
+#   sessions? It does NOT fit any new GLM. It reads the first-level results made
+#   by first_level_afni.sh, so the GLM settings are identical for both sessions
+#   by construction.
 #
-# LEVEL 1 — WITHIN-SUBJECT, per subject/task/contrast (ses-1 vs ses-2):
-#   * spatial_r  (3ddot -docor)  : Pearson r of the two sessions' maps -> pattern
-#       CONSISTENCY. Blind to a systematic session offset/scaling. Computed on
-#       both the beta (Coef) and the t-stat map.
-#   * spatial_icc (irr::icc in R) : ICC(2,1) absolute agreement of the same
-#       paired-voxel betas (voxels = targets, the 2 sessions = measurements).
-#       Same granularity as spatial_r but ALSO penalizes session offset/scaling.
-#       Computed with the established `irr` package (see spatial_icc.R), not
-#       hand-rolled, for provenance.
-#   * dice       (3ddot -dodice) : overlap of the two sessions' t-maps thresholded
-#       at p<PTHR (two-sided) -> do the same regions survive in both sessions?
-#   * dice_clust (3ddot -dodice) : same overlap, but each session's t-map is
-#       cluster-corrected first (voxel p<.001, per-session 3dClustSim, alpha .05).
-#       Both-empty pairs score 0 for every Dice (Gorgolewski et al. 2013).
-#   * scatter    (3dmaskdump)    : paired (ses-1, ses-2) betas dumped for plotting.
+#   It measures reliability at two levels:
 #
-# GROUP DICE BASELINE: within- vs between-subject Dice for every task/contrast
-# (dice_within_between.tsv), tested by dice_within_vs_between.R.
+#   LEVEL 1 — WITHIN ONE PERSON (per participant x task x contrast):
+#     spatial_r   Pearson correlation between the two sessions' maps, over all
+#                 voxels in a mask (3ddot -docor). Done on the beta map and on
+#                 the t-statistic map. It measures whether the PATTERN is the
+#                 same; it ignores a constant shift or scaling between sessions.
+#     spatial_icc Intraclass correlation ICC(2,1), absolute agreement, of the
+#                 same paired voxel betas (voxels = the things measured, the 2
+#                 sessions = the two measurements). Unlike spatial_r it is
+#                 lowered by a shift or scaling between sessions. Computed with
+#                 the R package irr (spatial_icc.R).
+#     dice        Overlap of the two sessions' t-maps, each thresholded at
+#                 p < 0.05 two-sided (3ddot -dodice). Do the same voxels pass
+#                 threshold in both sessions?
+#     dice_clust  The same overlap, but each session's t-map is first
+#                 cluster-corrected (voxel p < 0.001, cluster size from that
+#                 session's own 3dClustSim, cluster-level alpha 0.05).
+#     For every Dice: if NEITHER map has any voxels, the Dice is set to 0
+#     (Gorgolewski et al. 2013, NeuroImage 69:231-243).
+#     Also written: the paired session betas (for scatter plots) and a
+#     session-2-minus-session-1 difference map.
 #
-# LEVEL 2 — ACROSS-SUBJECT (group), per task/contrast:
-#   * 3dICC ICC(2,1) two-way random effects -> a voxelwise ICC MAP, estimated by
-#       pooling all subjects that have BOTH sessions (subjects = targets, the 2
-#       sessions = measurements). See the GROUP section below.
-#   NOTE: group ICC measures reliability of BETWEEN-SUBJECT differences. A region
-#   where everyone activates strongly AND identically has low between-subject
-#   variance -> LOW ICC even though activation is strong. So high ICC != "task
-#   reliably activates" (that is the group activation map). At today's tiny n of
-#   two-session subjects the group ICC is a wired-up placeholder that only becomes
-#   meaningful as subjects accrue -- it is flagged loudly at run time.
+#   LEVEL 2 — ACROSS PEOPLE (per task x contrast):
+#     group ICC   A voxelwise ICC(2,1) map from AFNI's 3dICC, pooling every
+#                 participant who has both sessions (participants = the things
+#                 measured, the 2 sessions = the two measurements).
+#     NOTE: this ICC measures how reliably people's DIFFERENCES from each other
+#     repeat across sessions. A region where everyone activates strongly and
+#     identically has little between-person variance, and so a LOW ICC, even
+#     though the activation is strong. High ICC does not mean "the task
+#     reliably activates this region" (that is the group activation map). With
+#     few two-session participants the map is unstable; the script prints a
+#     loud warning when n < 10.
 #
-# MASKING (fixes whole-brain inflation): every metric above is computed within a
-# GROUP-LEVEL mean_response ACTIVATION mask (a functional ROI from the across-
-# subject group map, independent of the ses1-vs-ses2 comparison -> avoids
-# double-dipping; robust contrast only -> not gated on the noisy rating_slope),
-# AND within the whole-brain mask as a reference. The summary TSV carries a `mask`
-# column (activation | wholebrain) to distinguish them.
-#   A third, DISABLED option -- a leave-one-subject-out ROI (mask=activation_loo)
-#   -- lives in STEP A3 below. It removes the residual circularity of building the
-#   ROI from a group map that includes the subject being measured. Only worth
-#   enabling once the sample is large; see the notes on that block.
+#   WITHIN- vs BETWEEN-PERSON DICE (per task x contrast):
+#     A within-person Dice only means something compared with how much ANY two
+#     people overlap. Following Gorgolewski et al. (2013), the script also
+#     computes the Dice for every pair of DIFFERENT participants within the same
+#     session, and writes all within and between values to one table. The test
+#     (within > between) is done afterwards by dice_within_vs_between.R.
 #
-# Contrasts compared (sub-brick labels in the REML bucket):
-#   mean_response  -> mean_response#0_Coef , mean_response#0_Tstat  (task activation)
-#   rating_slope   -> rating_slope#0_Coef  , rating_slope#0_Tstat   (parametric slope)
+#   MASKS. Every Level-1 metric is computed twice, inside two masks:
+#     activation  voxels significant (p < 0.05, two-sided) in the GROUP
+#                 mean_response map from second_level_afni.sh, inside the
+#                 whole-brain mask. Because the group map pools all participants
+#                 and averages the two sessions, it does not depend on the
+#                 ses-1 vs ses-2 comparison being measured. Only mean_response
+#                 (the robust contrast) is used to define it, never the noisier
+#                 rating_slope. If the group map is missing, this mask is
+#                 skipped and only the whole-brain mask is used.
+#     wholebrain  voxels the first-level GLM actually modelled in BOTH
+#                 sessions: non-zero mean_response AND rating_slope betas in
+#                 ses-1 and in ses-2 (see STEP 1).
+#     The summary table's `mask` column says which one each row used.
+#     A third, DISABLED mask (activation_loo, "leave one participant out") is
+#     written out in STEP 3; see the notes there.
 #
-# All subjects/sessions share the MNI152NLin2009cAsym grid (same warp template),
-# so comparisons are voxelwise with no resampling (mask is NN-resampled to be safe).
+#   CONTRASTS compared (sub-brick labels in each first-level REML bucket):
+#     mean_response   mean_response#0_Coef, mean_response#0_Tstat  (task activation)
+#     rating_slope    rating_slope#0_Coef,  rating_slope#0_Tstat   (BOLD change per
+#                                                                   rating point)
 #
-# Run with:  sbatch reproducibility_afni.sh sub-05     (one or several labels)
-#            sbatch reproducibility_afni.sh            (all sub-* with first-levels)
-# The GROUP ICC always pools ALL sub-* that have both sessions, regardless of args.
-# =============================================================================
+#   All participants and sessions are on the same MNI152NLin2009cAsym grid, so
+#   maps are compared voxel by voxel with no resampling. (The group activation
+#   map is still resampled to each mask's grid with nearest neighbour, to be
+#   safe.)
+#
+# WHERE IT SITS IN THE PIPELINE
+#   Before: first_level_afni.sh   (the per-session GLM results compared here)
+#           second_level_afni.sh  (the group mean_response map used for the
+#                                  activation mask; optional)
+#   After : dice_within_vs_between.R  (tests within- vs between-person Dice)
+#           local_r_steps.sh          (copies of afni_reproducibility/ are used
+#                                      on the Mac)
+#
+# STEPS
+#   LEVEL 1, for each participant x task (SECTION 4):
+#     1. Whole-brain mask: voxels that are brain in both sessions
+#     2. Activation mask from the group mean_response map
+#     3. (DISABLED) leave-one-participant-out activation mask
+#     4. Make the list of masks to use (activation if built, then wholebrain)
+#     5. Per-session minimum cluster size for dice_clust (3dFWHMx -> 3dClustSim)
+#     For each contrast:
+#     6. Make the binary maps: p < 0.05 t-maps and cluster-corrected t-maps
+#     7. In each mask: spatial_r, spatial_icc, dice, dice_clust
+#     8. Write the paired betas (scatter) and the ses-2 minus ses-1 map
+#   LEVEL 2, for each task x contrast (SECTION 5):
+#     9.  Find every participant with both sessions
+#     10. Copy each participant's beta maps out to NIfTI
+#     11. Build the group mask and run 3dICC; record the median ICC
+#   WITHIN vs BETWEEN DICE, for each task x contrast (SECTION 6):
+#     12. Write the small helper that computes many Dice values in one go
+#     13. Find participants and build the common masks
+#     14. List every within and between pair and compute their Dice
+#
+# INPUTS
+#   first-level betas/t : <AFNI_OUT>/sub-NN/ses-N/task-T/sub-NN_ses-N_task-T_stats_REML+tlrc
+#   first-level residuals: <AFNI_OUT>/sub-NN/ses-N/task-T/sub-NN_ses-N_task-T_errts_REML+tlrc
+#                         (for dice_clust only)
+#   group mean map       : <GROUP_OUT>/mema/mema_T_mean+tlrc   (3dMEMA, from
+#                          second_level_afni.sh STEP 3; sub-brick [1] = its
+#                          t-statistic; optional)
+#   spatial_icc.R        : in the folder sbatch was run from (see SCRIPT_DIR)
+#   participants.tsv, exclusions.tsv (runs to skip)
+#   (<AFNI_OUT>, <GROUP_OUT>: see SECTION 1a)
+#
+# OUTPUTS, in <REPRO_OUT> = /nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_reproducibility
+#   reproducibility_summary.tsv      THE LEVEL-1 RESULT. One row per
+#                                    participant / task / contrast / map /
+#                                    metric / mask. Columns:
+#                                    participant task contrast map metric mask value
+#   reproducibility_icc_summary.tsv  median group ICC per task / contrast
+#   dice_within_between.tsv          every within- and between-person Dice
+#   spatial_icc.R                    copy of the R helper the job actually ran
+#   sub-NN/task-T/                   per-participant working files:
+#     mask_ses-1.nii.gz, mask_ses-2.nii.gz, mask_both.nii.gz  (whole-brain masks)
+#     mask_activation.nii.gz                                  (activation mask)
+#     clustsim_ses-N_acf.1D, clustsim_ses-N.NN*_*.1D          (3dFWHMx / 3dClustSim)
+#     act_ses-N_<contrast>.nii.gz      p < 0.05 binary t-maps
+#     clust_ses-N_<contrast>.nii.gz    cluster-corrected binary t-maps
+#     scatter_<contrast>.txt           paired betas: i j k ses1 ses2
+#     ses2_minus_ses1_<contrast>_Coef.nii.gz
+#   group/                           LEVEL-2 files:
+#     inputs/sub-NN_ses-N_task-T_<contrast>_Coef.nii.gz
+#     groupmask_task-T_<contrast>.nii.gz, groupmask_act_task-T_<contrast>.nii.gz
+#     ICC_task-T_<contrast>+tlrc       THE LEVEL-2 RESULT (voxelwise ICC map)
+#   group/dice_wb/                   within/between Dice files:
+#     dice_batch.sh, mask_wholebrain_task-T.nii.gz, mask_activation_task-T.nii.gz
+#
+# HOW TO RUN (from /home/bradenf4/spirituality_fmri/scripts, so that
+#             spatial_icc.R is found next to this script)
+#   sbatch reproducibility_afni.sh                 # every sub-* in AFNI_OUT
+#   sbatch reproducibility_afni.sh sub-04 sub-05   # only these participants
+#   The arguments only limit LEVEL 1. The group ICC (SECTION 5) and the
+#   within/between Dice (SECTION 6) always use every participant on disk.
+#   Re-running replaces that participant's rows in reproducibility_summary.tsv.
+#   Afterwards:  Rscript dice_within_vs_between.R <REPRO_OUT>/dice_within_between.tsv
+#
+# METHODS SUMMARY (the exact values used below)
+#   Data           : first-level 3dREMLfit outputs (first_level_afni.sh) for
+#                    ses-1 and ses-2; contrasts mean_response and rating_slope;
+#                    runs listed in exclusions.tsv are skipped
+#   Whole-brain    : voxels with non-zero first-level betas (mean_response and
+#   mask             rating_slope) in BOTH sessions, i.e. exactly the voxels
+#                    the GLM modelled with data in both (complete-case voxels;
+#                    Sochat et al. 2015 Front Neurosci found this more accurate
+#                    for image similarity than treating zeros as values)
+#   Activation     : group one-sample 3dMEMA mean_response map
+#   mask             (second_level_afni.sh), |t| above the p < 0.05 two-sided
+#                    threshold (p2dsetstat), nearest-neighbour resampled, and
+#                    intersected with the whole-brain mask. Both positive and
+#                    negative effects are included.
+#   spatial_r      : Pearson r of the two sessions' maps within the mask
+#                    (3ddot -docor), on betas and on t-statistics
+#   spatial_icc    : ICC(2,1), two-way random, absolute agreement, single
+#                    measure (irr::icc), voxels as targets, on betas
+#   dice           : each session's t-map thresholded at p < 0.05 two-sided
+#                    (threshold from that map's own degrees of freedom);
+#                    Dice = 2|A and B| / (|A| + |B|) within the mask
+#                    (3ddot -dodice); both maps empty -> Dice = 0
+#   dice_clust     : voxel threshold p < 0.001, "bisided" (positive and
+#                    negative clusters formed separately), clusters of
+#                    face-touching voxels (NN1) of at least k voxels kept
+#                    (3dClusterize). k is per session: 3dFWHMx -acf on that
+#                    session's REML residuals within the whole-brain mask gives
+#                    the spatial autocorrelation (ACF) parameters, and
+#                    3dClustSim -acf gives the smallest cluster size with
+#                    cluster-level alpha < 0.05, rounded up. Clustering uses
+#                    the whole-brain mask; Dice is then computed within each
+#                    mask; both empty -> 0 (Gorgolewski et al. 2013)
+#   Group ICC      : 3dICC, model 1+(1|session)+(1|Subj) = ICC(2,1), on beta
+#                    maps of every participant with both sessions (needs n >= 2);
+#                    mask = voxels non-zero in every input, intersected with the
+#                    activation mask (p < 0.05) when available; the median ICC
+#                    inside the mask is reported
+#   Within vs      : within = same participant, ses-1 vs ses-2; between = every
+#   between Dice     pair of different participants within ses-1 and within
+#                    ses-2; all computed within one common mask per task
+#                    (intersection of every participant's whole-brain mask, and
+#                    that intersected with the activation mask); both for the
+#                    p < 0.05 and the cluster-corrected maps. Tested in
+#                    dice_within_vs_between.R (percentile bootstrap of the
+#                    Harrell-Davis median of within minus mean between)
+# ==============================================================================
 
-# NOTE: intentionally NOT using `set -e`. A single AFNI/container failure on one
-# subject/task must not abort the whole batch -- each task is guarded explicitly
-# and skips forward on failure (see mask guard + threshold guard below). pipefail
-# is on so a failing stage in a `cmd | tail | awk` pipeline is detectable.
+# This script deliberately does NOT use `set -e` (stop at the first failure).
+# One AFNI or container failure on one participant/task must not stop the whole
+# batch: each task checks its own results (see the mask check in STEP 1 and the
+# threshold checks in STEP 6) and skips ahead if something failed.
+# `pipefail` makes a pipeline such as `cmd | tail | awk` count as failed when
+# any part of it fails, not only the last part.
 set -o pipefail
 
+
 # ==============================================================================
-# CONFIGURATION
+# SECTION 1. SETTINGS
+# ------------------------------------------------------------------------------
+# Every path and parameter this script uses is defined here. Settings marked
+# [shared] also appear in other scripts and must match them; after editing one,
+# run  bash check_settings.sh  to confirm every copy still agrees.
 # ==============================================================================
 
-# --- All paths come from config.sh; edit there, not here ---
-# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
-# --- Locate config.sh ---------------------------------------------------------
-# Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
-# (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
-# with probe job 13292417. Deriving the path from BASH_SOURCE alone therefore
-# fails inside every batch job — the script dies before doing any work.
-#
-# Resolved in order of decreasing reliability:
-#   $PIPELINE_CONFIG   explicit override (used by audit_paths.sh fixture tests)
-#   $SLURM_SUBMIT_DIR  where sbatch was invoked — correct for the normal workflow
-#   dirname BASH_SOURCE  correct when run directly with bash, wrong under sbatch
-#   the install path   last-resort absolute
-CONFIG=""
-for _c in "${PIPELINE_CONFIG:-}" \
-          "${SLURM_SUBMIT_DIR:-}/config.sh" \
-          "${SLURM_SUBMIT_DIR:-}/../config.sh" \
-          "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config.sh" \
-          "/home/bradenf4/spirituality_fmri/scripts/config.sh"; do
-    case "${_c}" in ""|"/config.sh"|"/../config.sh") continue ;; esac
-    [ -f "${_c}" ] && { CONFIG="${_c}"; break; }
-done
-[ -n "${CONFIG}" ] || { echo "FATAL: cannot locate config.sh (set PIPELINE_CONFIG)" >&2; exit 1; }
-source "${CONFIG}"
-# Provides: TEDANA_OUT AFNI_OUT REPRO_OUT GROUP_OUT RLIB AFNI_SIF LOGS BIND_ARGS
+# --- 1a. Where the data live --------------------------------------------------
+# Three storage areas on the BYU supercomputer:
+#   /home/bradenf4                     backed up, never purged: code, timing, logs
+#   /nobackup/autodelete/usr/bradenf4  scratch, NOT backed up, purged after 12
+#                                      weeks unused: everything this job reads/writes
+#   /nobackup/archive/usr/bradenf4     raw data (read only) and archived results
+AFNI_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_firstlvl     # [shared] first-level results (input)
+REPRO_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_reproducibility  # [shared] output
+PARTICIPANTS_TSV=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/rawdata/participants.tsv  # [shared]
+EXCLUSIONS_TSV=/home/bradenf4/spirituality_fmri/scripts/exclusions.tsv                 # [shared] runs to skip
+LOGS=/home/bradenf4/spirituality_fmri/logs                                             # [shared]
 
-# --- Group-level mean_response activation map (from second_level_afni.sh STEP 3).
-#     3dMEMA one-sample output: [0]=effect, [1]=stat. Used to build the functional
-#     ROI mask. If absent, the script falls back to whole-brain only. ---
+# Group results from second_level_afni.sh. Only its 3dMEMA folder is read here
+# (GROUP_MEMA): the one-sample mean_response map mema_<task>_mean+tlrc, whose
+# sub-brick [0] is the group effect and [1] its t-statistic. It defines the
+# activation mask. If it is missing, the script uses the whole-brain mask only.
+# CAUTION: SECTION 5 later REUSES the name GROUP_OUT for a different folder,
+# <REPRO_OUT>/group. GROUP_MEMA is set here, before that, so it is unaffected.
+GROUP_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_group      # [shared]
 GROUP_MEMA=${GROUP_OUT}/mema
 
-# NOTE: RLIB now lives on /home (see config.sh), not in the group output tree.
-# Compute nodes have NO internet — that is why the original bootstrap install of
-# `irr` failed from inside a job and had to be redone from a login node. Keeping the
-# library on a backed-up, never-purged filesystem means that cannot recur.
+# The two summary tables this script writes (see OUTPUTS in the header).
+SUMMARY=${REPRO_OUT}/reproducibility_summary.tsv          # Level 1, one row per metric
+ICC_SUMMARY=${REPRO_OUT}/reproducibility_icc_summary.tsv  # Level 2, one row per task/contrast
 
-# --- Tasks (same labels as first_level_afni.sh) ---
-TASKS=(scripture FHS architecture)
+# Folder that holds this script and its R helper spatial_icc.R.
+# Under sbatch, $0 and BASH_SOURCE point at Slurm's private copy of the script,
+# not at the scripts folder, so the folder sbatch was run from
+# (SLURM_SUBMIT_DIR) is used instead. Run directly with bash, it is the script's
+# own folder. So submit the job from /home/bradenf4/spirituality_fmri/scripts.
+SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
-# --- Contrasts to compare (REML sub-brick label prefixes) ---
+# --- 1b. Software -------------------------------------------------------------
+# AFNI runs inside an Apptainer image. The image only sees folders that are
+# explicitly "bound" into it, so all three storage areas are bound.
+# The image also carries R and every R package used here (irr for spatial_icc;
+# lme4, blme, metafor, snow for 3dICC; data.table for 3dMEMA). Compute nodes
+# have no internet, so nothing can be installed from inside a job.
+AFNI_SIF=/apps/afni/26.3.04.sif                                                        # [shared] AFNI 26.3.04
+BIND_ARGS="--bind /home/bradenf4:/home/bradenf4 --bind /nobackup/autodelete/usr/bradenf4:/nobackup/autodelete/usr/bradenf4 --bind /nobackup/archive/usr/bradenf4:/nobackup/archive/usr/bradenf4"  # [shared]
+APPTAINER_MODULE=apptainer/1.3.6-qycanb2                                               # [shared]
+
+# R packages that must be inside the image (checked in SECTION 3):
+# spatial ICC needs irr; 3dICC needs lme4, blme, metafor and snow.
+ICC_PKGS='c("irr","lme4","blme","metafor","snow")'
+
+# --- 1c. Analysis parameters --------------------------------------------------
+# Tasks, by their BIDS labels.
+TASKS=(scripture FHS architecture)                                                     # [shared]
+
+# Contrasts to compare: the label prefixes of the sub-bricks in each REML bucket
+# (<label>#0_Coef = beta, <label>#0_Tstat = t-statistic).
 CONTRASTS=(mean_response rating_slope)
 
-# --- Dice threshold: voxelwise p, two-sided (liberal on purpose, see header) ---
-PTHR=0.05
-
-# --- Cluster-corrected Dice (metric dice_clust) ---
-# Each session's t-map is thresholded at voxel p < CLUST_PTHR (bisided) and only
-# clusters >= k voxels are kept, where k comes from 3dClustSim run on THAT
-# session's own residual smoothness (3dFWHMx -acf on its errts_REML) for
-# cluster-level alpha CLUST_ATHR. p < .001 is the recommended lower limit for the
-# cluster-forming threshold (Woo, Krishnan & Wager 2014, NeuroImage 91:412-419;
-# Eklund et al. 2016 PNAS showed p = .01 inflates false positives badly). The
-# ACF model is AFNI's post-Eklund fix (Cox et al. 2017, Brain Connectivity 7:152).
-CLUST_PTHR=0.001
-CLUST_ATHR=0.05
-
-# --- Activation-mask threshold: voxelwise p, two-sided, on the group mean map ---
-ACT_PTHR=0.05
-
-# --- The two sessions we compare (test-retest = ses-1 vs ses-2) ---
+# The two sessions compared (test = ses-1, retest = ses-2).
 SES1=ses-1
 SES2=ses-2
 
-# --- Where this script (and spatial_icc.R) live, so we can find the R helper.
-#     Under SLURM this is the submit dir; otherwise the script's own dir. ---
-SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+# Voxelwise threshold for the plain `dice` metric: p < 0.05, two-sided.
+PTHR=0.05
+
+# Cluster-corrected Dice (metric dice_clust). Each session's t-map is
+# thresholded at voxel p < CLUST_PTHR (bisided) and only clusters of at least k
+# voxels are kept. k comes from 3dClustSim run on THAT session's own residual
+# smoothness (3dFWHMx -acf on its errts_REML), for cluster-level alpha
+# CLUST_ATHR. p < .001 is the recommended upper limit for the cluster-forming
+# p-value (Woo, Krishnan & Wager 2014, NeuroImage 91:412-419; Eklund et al. 2016
+# PNAS showed p = .01 inflates false positives badly). The ACF model is AFNI's
+# post-Eklund fix (Cox et al. 2017, Brain Connectivity 7:152).
+CLUST_PTHR=0.001
+CLUST_ATHR=0.05
+
+# Threshold for the activation mask: p < 0.05, two-sided, on the group
+# mean_response map.
+ACT_PTHR=0.05
+
 
 # ==============================================================================
+# SECTION 2. HELPER FUNCTIONS
+# ==============================================================================
 
-mkdir -p "${LOGS}" "${REPRO_OUT}"
+# byv_for_sub sub-NN  ->  prints that participant's BYV id (e.g. 0AK1RT).
+# BIDS labels participants sub-NN (numbered in scan-date order), but the lab's
+# records (and exclusions.tsv) use the BYV id. participants.tsv maps one to the
+# other via its 'participant_id' and 'byv_id' columns.
+# (The awk variable is 'want', not 'sub': sub() is a built-in awk function.)
+byv_for_sub() {
+    awk -F'\t' -v want="$1" '
+        NR==1 { for (i=1;i<=NF;i++){ if($i=="participant_id")p=i; if($i=="byv_id")b=i}; next }
+        $p==want { print $b; exit }
+    ' "${PARTICIPANTS_TSV}"
+}
 
-module load apptainer/1.3.6-qycanb2
+# is_excluded sub-NN ses-N task  ->  succeeds (and prints the reason) if that run
+# is listed in exclusions.tsv. That table has one row per excluded run:
+#   byv_id  session  task  reason  date_added      ("*" = every session / task)
+# Currently: 1VK4L2 ses-1, all tasks (asleep for most of the session).
+# If exclusions.tsv or the participant's BYV id cannot be found, the run is
+# treated as NOT excluded.
+is_excluded() {                                                                        # [shared]
+    local byv
+    [ -f "${EXCLUSIONS_TSV}" ] || return 1
+    case "$1" in sub-*) byv=$(byv_for_sub "$1") ;; *) byv=$1 ;; esac
+    [ -n "${byv}" ] || return 1
+    awk -F'\t' -v b="${byv}" -v s="$2" -v t="$3" '
+        NR==1 || /^#/ { next }
+        $1==b && ($2==s || $2=="*") && ($3==t || $3=="*") { print $4; found=1; exit }
+        END { exit(found ? 0 : 1) }' "${EXCLUSIONS_TSV}"
+}
 
-# AFNI_DECONFLICT=OVERWRITE so re-runs overwrite intermediate files cleanly.
-AFNI="apptainer exec --env AFNI_DECONFLICT=OVERWRITE ${BIND_ARGS} ${AFNI_SIF} bash -c"
-# R-enabled invocation for the ICC steps (irr for spatial ICC, 3dICC for the group
-# map). Exposes the persistent R library so those R programs find their packages.
-AFNI_R="apptainer exec --env AFNI_DECONFLICT=OVERWRITE --env R_LIBS_USER=${RLIB} ${BIND_ARGS} ${AFNI_SIF} bash -c"
-
-# --- Precondition: the ICC R packages must already be in RLIB ---
-#   spatial ICC (irr) + 3dICC (blme, lme4, metafor, snow).
-# This used to attempt install.packages() inline. Compute nodes have NO internet,
-# so that could never reach CRAN from inside a job. Check and fail fast instead.
-ICC_PKGS='c("irr","lme4","blme","metafor","snow")'
-if ! ${AFNI_R} "Rscript -e 'q(status=length(setdiff(${ICC_PKGS}, rownames(installed.packages()))))'"; then
-    echo "ERROR: the ICC R packages are missing from ${RLIB}."
-    echo "       (need: irr, lme4, blme, metafor, snow)"
-    echo
-    echo "They cannot be installed from here — compute nodes have no internet."
-    echo "Run this once on a LOGIN NODE, then resubmit:"
-    echo "    bash ${PROJ_HOME}/scripts/setup_rlib.sh"
-    exit 1
-fi
-
-# --- Stage the spatial-ICC R helper somewhere the container can read (under BIND) ---
-ICC_R=${REPRO_OUT}/spatial_icc.R
-if [ -f "${SCRIPT_DIR}/spatial_icc.R" ]; then
-    cp -f "${SCRIPT_DIR}/spatial_icc.R" "${ICC_R}"
-else
-    echo "WARNING: spatial_icc.R not found in ${SCRIPT_DIR}; spatial_icc will record NA" >&2
-    ICC_R=""
-fi
-
-# Global summary table (one row per subject / task / contrast / map / metric / mask).
-SUMMARY=${REPRO_OUT}/reproducibility_summary.tsv
-if [ ! -f "${SUMMARY}" ]; then
-    printf 'participant\ttask\tcontrast\tmap\tmetric\tmask\tvalue\n' > "${SUMMARY}"
-fi
-
-# Group ICC summary (one row per task / contrast).
-ICC_SUMMARY=${REPRO_OUT}/reproducibility_icc_summary.tsv
-
+# add_metric participant task contrast map metric mask value
+#   Appends one row to the Level-1 summary table (SUMMARY).
 add_metric() {  # args: participant task contrast map metric mask value
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6" "$7" >> "${SUMMARY}"
 }
 
-# Run an AFNI command that is expected to print a single scalar on its last line
-# and echo that value. If nothing comes back (AFNI/container error, unknown flag,
-# missing sub-brick), warn loudly and echo "NA" so the gap is visible in the TSV
-# instead of a silent blank cell.
+# afni_scalar "description" "AFNI command"  ->  prints one number.
+#   Runs an AFNI command that prints a single number on its last line, and
+#   prints the first word of that line. If nothing comes back (AFNI/container
+#   error, unknown option, missing sub-brick), it warns and prints "NA", so the
+#   gap shows up in the table as NA instead of a silent blank cell.
 afni_scalar() {  # args: description  afni_command_string
     local desc="$1" cmd="$2" val
     val=$(${AFNI} "${cmd}" 2>/dev/null | tail -n1 | awk '{print $1}')
@@ -214,13 +369,18 @@ afni_scalar() {  # args: description  afni_command_string
     printf '%s' "${val}"
 }
 
-# Spatial ICC(2,1) of a masked pair of beta maps, via the irr package. Echoes the
-# ICC value, or NA on any failure (missing helper, degenerate mask, R error).
+# spatial_icc "description" mask session1_beta session2_beta  ->  prints the ICC.
+#   1. 3dmaskdump writes the two sessions' beta values, one row per voxel inside
+#      the mask (-noijk: values only, no voxel coordinates), to a temp file.
+#   2. spatial_icc.R (run with R inside the image) computes ICC(2,1), absolute
+#      agreement, single measure, with irr::icc, treating voxels as targets.
+#   Prints NA on any failure (R helper missing, empty mask, R error).
 spatial_icc() {  # args: description  mask  s1_coef_selector  s2_coef_selector
     local desc="$1" mask="$2" a="$3" b="$4" pairs val
     if [ -z "${ICC_R}" ]; then printf 'NA'; return; fi
-    # Serial script -> a single reusable temp file is fine and portable (avoids
-    # GNU mktemp's dislike of a suffix after the X's).
+    # The script runs one comparison at a time, so one reusable temp file in the
+    # current output folder (OUT) is enough. (This avoids mktemp, whose
+    # templates differ between systems.)
     pairs="${OUT}/.icc_pairs.txt"
     rm -f "${pairs}"
     ${AFNI} "3dmaskdump -noijk -mask ${mask} -o ${pairs} ${a} ${b}" >/dev/null 2>&1
@@ -234,10 +394,13 @@ spatial_icc() {  # args: description  mask  s1_coef_selector  s2_coef_selector
     printf '%s' "${val}"
 }
 
-# Dice overlap of two binary maps within a mask, echoed as "dice n_a n_b"
-# (n = suprathreshold voxels inside the mask). If BOTH maps are empty the Dice is
-# 0, not undefined -- the convention of Gorgolewski et al. (2013, NeuroImage
-# 69:231-243), "to penalise for lack of signal". Echoes "NA NA NA" on AFNI failure.
+# dice_pair "description" mask map_a map_b  ->  prints "dice n_a n_b".
+#   map_a and map_b are binary (0/1) maps. n_a and n_b are the number of
+#   non-zero voxels of each inside the mask (3dBrickStat -non-zero -count), and
+#   dice is their Dice overlap inside the mask (3ddot -dodice).
+#   If BOTH maps are empty the Dice is set to 0, not left undefined: the
+#   convention of Gorgolewski et al. (2013, NeuroImage 69:231-243), "to penalise
+#   for lack of signal". Prints "NA NA NA" if AFNI returned no counts.
 dice_pair() {  # args: description  mask  map_a  map_b
     local desc="$1" mask="$2" a="$3" b="$4" na nb d
     read -r na nb d <<< "$(${AFNI} "3dBrickStat -mask ${mask} -non-zero -count ${a}; \
@@ -254,9 +417,20 @@ dice_pair() {  # args: description  mask  map_a  map_b
     printf '%s %s %s' "${d}" "${na}" "${nb}"
 }
 
-# Minimum cluster size (voxels) for one session: 3dFWHMx -acf on that session's
-# REML residuals -> 3dClustSim. Cached next to `prefix` and recomputed only when
-# the residuals are newer than the cached table. Echoes k (rounded up) or "".
+# session_clust_k residuals mask prefix  ->  prints k, the minimum cluster size
+# (in voxels) for one session.
+#   1. 3dFWHMx -acf fits the spatial autocorrelation of that session's REML
+#      residuals inside the mask, ACF(r) = a*exp(-r^2/(2b^2)) + (1-a)*exp(-r/c),
+#      and prints the parameters a b c on its last line. (It also writes the
+#      ACF curve to <prefix>_acf.1D.)
+#   2. 3dClustSim -acf a b c simulates noise with that smoothness inside the
+#      mask and writes tables of the cluster size needed for cluster-level
+#      alpha CLUST_ATHR at voxel p CLUST_PTHR (<prefix>.NN1_bisided.1D, etc.).
+#      It uses SLURM_CPUS_PER_TASK cores (4 if that is not set).
+#   3. k is read from the NN1 bisided table (first data row, second column)
+#      and rounded up to a whole voxel.
+#   The tables are re-made only if they do not exist yet or the residuals are
+#   newer than them. Prints nothing if 3dFWHMx fails.
 session_clust_k() {  # args: errts_dataset(no .HEAD)  mask  prefix
     local errts="$1" mask="$2" pre="$3" acf a b c k
     if [ ! -f "${pre}.NN1_bisided.1D" ] || [ "${errts}.HEAD" -nt "${pre}.NN1_bisided.1D" ]; then
@@ -273,9 +447,16 @@ session_clust_k() {  # args: errts_dataset(no .HEAD)  mask  prefix
     printf '%s' "${k}"
 }
 
-# Binary cluster-corrected map: voxel p < CLUST_PTHR (bisided, from the bucket's
-# own t dof), clusters >= k voxels (NN1). An empty map is still written
-# (-outvol_if_no_clust) so "no surviving clusters" is a value, not a missing file.
+# clust_map stats_bucket t_label mask k out.nii.gz
+#   Writes a binary (0/1) cluster-corrected map. 3dClusterize thresholds the
+#   t sub-brick at voxel p < CLUST_PTHR, "bisided" (positive and negative
+#   voxels form separate clusters; the p-value is converted to a t threshold
+#   using the bucket's own degrees of freedom), joins face-touching voxels into
+#   clusters (-NN 1), and keeps clusters of at least k voxels. 3dcalc
+#   step(a) turns the cluster-number map into 0/1.
+#   -outvol_if_no_clust writes an all-zero map when no cluster survives, so
+#   "no surviving clusters" is a value (Dice 0 or a count of 0), not a missing
+#   file. Succeeds only if the output file exists.
 clust_map() {  # args: stats_bucket  tstat_label  mask  k  out.nii.gz
     local idx="${5%.nii.gz}_idx.nii.gz"
     rm -f "${idx}" "${5}"
@@ -286,12 +467,61 @@ clust_map() {  # args: stats_bucket  tstat_label  mask  k  out.nii.gz
     [ -f "${5}" ]
 }
 
+
 # ==============================================================================
-# LOOP: participants -> tasks   (ses-1 vs ses-2 compared inside each task)
+# SECTION 3. SETUP AND CHECKS
 # ==============================================================================
 
-# Participants to process. Pass labels as args (e.g. "sub-05" or "05"); with NO
-# args, defaults to ALL sub-* that have first-level output.
+mkdir -p "${LOGS}" "${REPRO_OUT}"
+
+module load "${APPTAINER_MODULE}"
+
+# Every AFNI command below runs as:  ${AFNI} "<commands>"
+# AFNI refuses to overwrite existing files by default; AFNI_DECONFLICT=OVERWRITE
+# (passed into the image with --env) lets a re-run replace its own files.
+AFNI="apptainer exec --env AFNI_DECONFLICT=OVERWRITE ${BIND_ARGS} ${AFNI_SIF} bash -c"
+# The R-based steps (spatial_icc.R, 3dICC) run as:  ${AFNI_R} "<commands>"
+# The R packages ship INSIDE the AFNI image. --cleanenv starts the image with an
+# empty environment, so a host setting (e.g. a stray R_LIBS) cannot override
+# those packages. Every variable these commands need is filled in on the host
+# before the command reaches the image, and --env still applies under --cleanenv.
+AFNI_R="apptainer exec --cleanenv --env AFNI_DECONFLICT=OVERWRITE ${BIND_ARGS} ${AFNI_SIF} bash -c"
+
+# Check that the image has the R packages listed in ICC_PKGS (SECTION 1b).
+# The R one-liner exits with the number of missing packages (0 = all present).
+# Failing here is clearer than an obscure R error deep inside 3dICC.
+if ! ${AFNI_R} "Rscript -e 'q(status=length(setdiff(${ICC_PKGS}, rownames(installed.packages()))))'"; then
+    echo "ERROR: the ICC R packages are missing from ${AFNI_SIF}."
+    echo "       (need: irr, lme4, blme, metafor, snow)"
+    echo "Check that AFNI_SIF in config.sh points at the R-enabled image (see container_request.md)."
+    exit 1
+fi
+
+# Copy the spatial-ICC R helper into REPRO_OUT, a bound folder the image can
+# read; this also keeps a record of the exact helper the job ran. If it is not
+# found in SCRIPT_DIR, every spatial_icc value is recorded as NA.
+ICC_R=${REPRO_OUT}/spatial_icc.R
+if [ -f "${SCRIPT_DIR}/spatial_icc.R" ]; then
+    cp -f "${SCRIPT_DIR}/spatial_icc.R" "${ICC_R}"
+else
+    echo "WARNING: spatial_icc.R not found in ${SCRIPT_DIR}; spatial_icc will record NA" >&2
+    ICC_R=""
+fi
+
+# Start the Level-1 summary table (header row) if it does not exist yet. An
+# existing table is kept, so rows for participants not re-run this time stay.
+if [ ! -f "${SUMMARY}" ]; then
+    printf 'participant\ttask\tcontrast\tmap\tmetric\tmask\tvalue\n' > "${SUMMARY}"
+fi
+
+
+# ==============================================================================
+# SECTION 4. LEVEL 1 — WITHIN-PERSON RELIABILITY
+#            loop: participants -> tasks   (ses-1 vs ses-2 compared in each)
+# ==============================================================================
+
+# Participants: the ones named on the command line ("sub-05" or "05"), or every
+# sub-* folder in the first-level output.
 if [ "$#" -gt 0 ]; then
     PARTICIPANT_DIRS=()
     for arg in "$@"; do
@@ -302,9 +532,9 @@ else
     PARTICIPANT_DIRS=("${AFNI_OUT}"/sub-*)
 fi
 
-# Count task-comparisons that actually ran. If NOTHING runs (e.g. the whole node
-# has a broken container), we exit non-zero at the end so the FAIL email fires
-# rather than reporting a silently "successful" empty run.
+# Count the participant x task comparisons that actually ran. If none ran
+# (e.g. the container is broken on this node), the script exits with an error
+# after this loop, so the FAIL email is sent instead of an empty "success".
 PROCESSED=0
 
 for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
@@ -314,8 +544,8 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
     fi
     PARTICIPANT_ID=$(basename "${PARTICIPANT_DIR}")
 
-    # Idempotent re-runs: drop any prior rows for this participant from the
-    # summary so a repeated run refreshes rather than duplicates them.
+    # Re-runs replace, not duplicate: delete this participant's old rows from
+    # the summary table (keeping the header) before new ones are added.
     if [ -f "${SUMMARY}" ]; then
         awk -F'\t' -v s="${PARTICIPANT_ID}" 'NR==1 || $1!=s' "${SUMMARY}" > "${SUMMARY}.tmp" \
             && mv "${SUMMARY}.tmp" "${SUMMARY}"
@@ -323,25 +553,20 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
 
     for TASK in "${TASKS[@]}"; do
 
+        # --- This task's input files, and checks ------------------------------
         # First-level REML buckets for the two sessions (AFNI +tlrc HEAD/BRIK).
         S1=${AFNI_OUT}/${PARTICIPANT_ID}/${SES1}/task-${TASK}/${PARTICIPANT_ID}_${SES1}_task-${TASK}_stats_REML+tlrc
         S2=${AFNI_OUT}/${PARTICIPANT_ID}/${SES2}/task-${TASK}/${PARTICIPANT_ID}_${SES2}_task-${TASK}_stats_REML+tlrc
 
+        # Skip if either session's results are missing ...
         if [ ! -f "${S1}.HEAD" ] || [ ! -f "${S2}.HEAD" ]; then
             echo "skip: ${PARTICIPANT_ID} task-${TASK} -- missing a session's REML bucket (need both ${SES1} and ${SES2})"
             continue
         fi
+        # ... or if either session is listed in exclusions.tsv.
         if why=$(is_excluded "${PARTICIPANT_ID}" "${SES1}" "${TASK}") \
            || why=$(is_excluded "${PARTICIPANT_ID}" "${SES2}" "${TASK}"); then
             echo "skip: ${PARTICIPANT_ID} task-${TASK} -- EXCLUDED (exclusions.tsv): ${why}"
-            continue
-        fi
-
-        # tedana bolds (only needed to build the brain mask)
-        BOLD1=${TEDANA_OUT}/${PARTICIPANT_ID}/${SES1}/func/${PARTICIPANT_ID}_${SES1}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
-        BOLD2=${TEDANA_OUT}/${PARTICIPANT_ID}/${SES2}/func/${PARTICIPANT_ID}_${SES2}_task-${TASK}_space-MNI152NLin2009cAsym_desc-tedana_bold.nii.gz
-        if [ ! -f "${BOLD1}" ] || [ ! -f "${BOLD2}" ]; then
-            echo "skip: ${PARTICIPANT_ID} task-${TASK} -- missing a tedana bold for the mask"
             continue
         fi
 
@@ -350,21 +575,39 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         echo "=== ${PARTICIPANT_ID} task-${TASK}: comparing ${SES1} vs ${SES2} ==="
 
         # ------------------------------------------------------------------
-        # STEP A: whole-brain mask = intersection of each session's automask.
-        # (3dDeconvolve now runs with -mask, so buckets are already zero outside
-        # the brain; this automask intersection stays as the reference mask for
-        #  voxel; restricting to brain keeps the metrics meaningful.)
+        # STEP 1. Whole-brain mask = voxels the GLM modelled in BOTH sessions.
+        #
+        # The first-level GLM only fits voxels that are inside fMRIPrep's
+        # brain mask AND have data in the tedana output (first_level_afni.sh
+        # STEP 2 sets everything else to 0), so every beta outside that set is
+        # exactly 0. Those voxels must not enter the comparison: a 0 in both
+        # sessions would count as perfect agreement in spatial_r and
+        # spatial_icc, and would also enter the smoothness estimate and the
+        # cluster-size simulation (STEP 5).
+        #
+        # So, for each session, mask_ses-N = voxels where BOTH the
+        # mean_response and the rating_slope beta are non-zero
+        # (step(abs(a)) = 1 for any non-zero value). mask_both = voxels in
+        # both sessions' masks (3dmask_tool -inter). This is the "wholebrain"
+        # mask for every metric. Because it is built from the betas
+        # themselves, it can never disagree with what was modelled.
+        # (Until 2026-10-24 this mask was 3dAutomask of each session's tedana
+        # BOLD, which did not match the GLM's mask.)
         # ------------------------------------------------------------------
         MASK=${OUT}/mask_both.nii.gz
+        rm -f "${OUT:?}"/mask_${SES1}.nii.gz "${OUT:?}"/mask_${SES2}.nii.gz "${MASK:?}"
         ${AFNI} "
-            3dAutomask -overwrite -prefix ${OUT}/mask_${SES1}.nii.gz ${BOLD1}
-            3dAutomask -overwrite -prefix ${OUT}/mask_${SES2}.nii.gz ${BOLD2}
+            3dcalc -overwrite -a ${S1}'[mean_response#0_Coef]' -b ${S1}'[rating_slope#0_Coef]' \
+                -expr 'step(abs(a))*step(abs(b))' -datum byte -prefix ${OUT}/mask_${SES1}.nii.gz
+            3dcalc -overwrite -a ${S2}'[mean_response#0_Coef]' -b ${S2}'[rating_slope#0_Coef]' \
+                -expr 'step(abs(a))*step(abs(b))' -datum byte -prefix ${OUT}/mask_${SES2}.nii.gz
             3dmask_tool -overwrite -input ${OUT}/mask_${SES1}.nii.gz ${OUT}/mask_${SES2}.nii.gz -inter -prefix ${MASK}
         "
+        echo "  whole-brain mask: $(${AFNI} "3dBrickStat -count -non-zero ${MASK}" 2>/dev/null | tail -n1 | awk '{print $1}') voxels (non-zero betas in both sessions)"
 
-        # If the mask never got built, the container/AFNI failed on this node
-        # (this is exactly what killed the 2026-07-20 run: the compute node had
-        # no /dev/fuse). Skip this task instead of aborting the whole batch.
+        # If the mask was not made, AFNI or the container failed on this node
+        # (this is what killed the 2026-07-20 run: the compute node had no
+        # /dev/fuse). Skip this task instead of stopping the whole batch.
         if [ ! -f "${MASK}" ]; then
             echo "skip: ${PARTICIPANT_ID} task-${TASK} -- mask build failed (AFNI/container error on this node?)"
             continue
@@ -372,11 +615,20 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         PROCESSED=$((PROCESSED + 1))
 
         # ------------------------------------------------------------------
-        # STEP A2: group mean_response ACTIVATION mask (functional ROI).
-        # From the across-subject group map (mema_<task>_mean, [1]=stat), so it is
-        # independent of either session's own threshold (no double-dipping), and it
-        # uses the ROBUST contrast only. Thresholded, NN-resampled to this grid, and
-        # intersected with the brain mask. Falls back to whole-brain only if absent.
+        # STEP 2. Activation mask from the GROUP mean_response map.
+        #
+        # Source: mema_<task>_mean+tlrc from second_level_afni.sh, sub-brick
+        # [1] = group t-statistic. Because it pools all participants, it does
+        # not depend on either session's own threshold (avoids "double
+        # dipping"), and it uses only the robust mean_response contrast.
+        #   p2dsetstat     converts p < ACT_PTHR (two-sided) into a t value,
+        #                  using the map's own degrees of freedom
+        #   3dcalc         step(abs(a)-thr): 1 where |t| > thr (positive OR
+        #                  negative effects), else 0
+        #   3dresample     put it on this mask's grid, nearest neighbour
+        #   3dmask_tool    keep only voxels also in the whole-brain mask
+        # If the group map is missing, no activation mask is made (STEP 4 then
+        # uses the whole-brain mask only).
         # ------------------------------------------------------------------
         ACTMASK=${OUT}/mask_activation.nii.gz
         rm -f "${ACTMASK}"
@@ -393,41 +645,44 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         fi
 
         # ------------------------------------------------------------------
-        # STEP A3 (DISABLED) — LEAVE-ONE-SUBJECT-OUT activation ROI
+        # STEP 3 (DISABLED). LEAVE-ONE-PARTICIPANT-OUT activation mask
         #
-        # WHY: the STEP A2 ROI comes from a group MEMA that INCLUDES this subject,
-        # so ~1/n of the evidence selecting the voxels IS the subject being
-        # measured. That is a weak form of double dipping. STEP 1 of
-        # second_level_afni.sh averages the two sessions before MEMA, so the ROI is
-        # blind to the ses1-vs-ses2 DIFFERENCE -- but it still sees their SUM, and
-        # selecting on a large |b1+b2| preferentially keeps voxels where the two
-        # sessions happened to be large together, nudging spatial_r / spatial_icc
-        # upward. LOO removes the dependence: sub-X's ROI is built from everyone
-        # EXCEPT sub-X, so selection noise and measurement noise are independent.
+        # WHY: the STEP 2 mask comes from a group map that INCLUDES this
+        # participant, so about 1/n of the evidence that selects the voxels
+        # comes from the person being measured. That is a weak form of double
+        # dipping. second_level_afni.sh (its STEP 1) averages the two sessions
+        # before 3dMEMA, so the mask cannot see the ses-1 vs ses-2 DIFFERENCE,
+        # but it does see their SUM. Selecting voxels with a large |b1+b2|
+        # favours voxels where both sessions happened to be large together,
+        # which nudges spatial_r / spatial_icc upward. Leaving the participant
+        # out removes this: sub-X's mask is built from everyone EXCEPT sub-X, so
+        # the noise that selects voxels and the noise being measured are
+        # independent.
         #
-        # COST: the LOO MEMA has n-1 subjects, so dof drops and the threshold rises
-        # (at n=4: t(2)=4.303 vs t(3)=3.182). Each subject also gets a DIFFERENT
-        # ROI, so activation_loo values are not strictly comparable across subjects
-        # -- keep the shared-ROI `activation` rows as the comparable set and read
-        # the LOO rows as the bias-free companion.
+        # COST: the leave-one-out map has n-1 participants, so its degrees of
+        # freedom drop and the threshold rises (at n=4: t(2)=4.303 vs
+        # t(3)=3.182). Each participant also gets a DIFFERENT mask, so
+        # activation_loo values are not strictly comparable across people --
+        # keep the shared-mask `activation` rows as the comparable set and read
+        # the leave-one-out rows as the bias-free companion.
         #
-        # DO NOT ENABLE BELOW ~8-10 SUBJECTS. At small n the LOO ROI is so unstable
-        # that you trade a known bias for unknown noise. LOO_MIN_N enforces this.
+        # DO NOT ENABLE BELOW ~8-10 PARTICIPANTS. With few participants the
+        # leave-one-out mask is so unstable that you trade a known bias for
+        # unknown noise. LOO_MIN_N enforces this.
         #
         # PREREQUISITES before uncommenting:
-        #   1. second_level_afni.sh must persist its per-subject session-averaged
-        #      inputs (they currently exist only in autodelete scratch, which is
-        #      purged). In its STEP 7 change
+        #   1. second_level_afni.sh must keep its per-participant
+        #      session-averaged inputs (they currently exist only in autodelete
+        #      scratch, which is purged). In its STEP 7 change
         #          for d in mask mema ttest clustsim; do
         #      to
         #          for d in mask mema ttest clustsim inputs; do
         #      and re-run it.
-        #   2. 3dMEMA needs R packages data.table + snow. The bootstrap at the top
-        #      of THIS script installs snow but not data.table -- either add
-        #      "data.table" to ICC_PKGS, or rely on second_level_afni.sh having
-        #      already installed it into the shared RLIB.
-        #   3. rm -rf ${REPRO_OUT}/loo_mema whenever the subject set changes: the
-        #      LOO maps are cached per (task, excluded subject) and go stale.
+        #   2. 3dMEMA needs R packages data.table + snow (both in the AFNI image)
+        #      and must be called through ${AFNI_R}, not ${AFNI}.
+        #   3. rm -rf ${REPRO_OUT}/loo_mema whenever the set of participants
+        #      changes: the leave-one-out maps are cached per (task, left-out
+        #      participant) and go stale.
         # ------------------------------------------------------------------
         # LOO_MIN_N=8                                   # min OTHER subjects required
         # LOO_INPUTS=${PROJECT}/derivatives/afni_group/inputs
@@ -462,7 +717,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         #                 -missing_data 0 -set ${TASK}_mean ${LOO_SET}"
         #         fi
         #         if [ -f "${LOO_MEMA}+tlrc.HEAD" ]; then
-        #             # Same threshold -> binarize -> NN-resample -> intersect as STEP A2.
+        #             # Same threshold -> binarize -> NN-resample -> intersect as STEP 2.
         #             LTHR=$(${AFNI} "p2dsetstat -quiet -inset ${LOO_MEMA}'[1]' -pval ${ACT_PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
         #             if [ -n "${LTHR}" ]; then
         #                 ${AFNI} "
@@ -479,7 +734,13 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         #     fi
         # fi
 
-        # Build the mask list: activation (if a non-empty ROI was built) + wholebrain.
+        # ------------------------------------------------------------------
+        # STEP 4. The list of masks to compute every metric in.
+        #
+        # Each entry is "tag:file". The activation mask is used only if STEP 2
+        # made it AND it has at least one voxel (3dBrickStat -non-zero -count);
+        # the whole-brain mask is always used.
+        # ------------------------------------------------------------------
         MASKS=()
         NACT=""
         if [ -f "${ACTMASK}" ]; then
@@ -490,7 +751,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         else
             echo "  WARN: ${TASK} -- no group activation ROI (mema_${TASK}_mean missing/empty); activation metrics -> whole-brain only" >&2
         fi
-        # --- LOO ROI (STEP A3): uncomment together with the STEP A3 block above ---
+        # --- Leave-one-out mask (STEP 3): uncomment together with STEP 3 above ---
         # NACT_LOO=""
         # if [ -f "${ACTMASK_LOO}" ]; then
         #     NACT_LOO=$(${AFNI} "3dBrickStat -non-zero -count ${ACTMASK_LOO}" 2>/dev/null | tail -n1 | awk '{print $1}')
@@ -501,9 +762,13 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
         MASKS+=("wholebrain:${MASK}")
 
         # ------------------------------------------------------------------
-        # STEP B: per-session cluster-size thresholds for dice_clust. Each
-        # session uses its own residual smoothness (sessions can differ in
-        # motion/censoring), computed once per task and shared by contrasts.
+        # STEP 5. Minimum cluster size k for each session (for dice_clust).
+        #
+        # Each session uses its own residual smoothness, because sessions can
+        # differ in motion and censoring (see session_clust_k in SECTION 2).
+        # Computed once per task and shared by both contrasts. Both k values
+        # are written to the summary table as metric clust_k_ses-N
+        # (contrast "all", map "tstat", mask "wholebrain").
         # ------------------------------------------------------------------
         E1=${AFNI_OUT}/${PARTICIPANT_ID}/${SES1}/task-${TASK}/${PARTICIPANT_ID}_${SES1}_task-${TASK}_errts_REML+tlrc
         E2=${AFNI_OUT}/${PARTICIPANT_ID}/${SES2}/task-${TASK}/${PARTICIPANT_ID}_${SES2}_task-${TASK}_errts_REML+tlrc
@@ -518,16 +783,24 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             add_metric "${PARTICIPANT_ID}" "${TASK}" all tstat clust_k_${SES2} wholebrain "${K2}"
         fi
 
-        # ------------------------------------------------------------------
-        # Per contrast: spatial_r (beta & t), spatial_icc (beta), Dice (t) within
-        # each mask; scatter + diff once (whole-brain).
-        # ------------------------------------------------------------------
+        # --- Per contrast: STEPS 6-8 ------------------------------------------
         for CON in "${CONTRASTS[@]}"; do
             COEF="${CON}#0_Coef"
             TSTAT="${CON}#0_Tstat"
 
-            # Session-thresholded binary t-maps for Dice (mask-independent; the mask
-            # is applied by 3ddot -dodice). Built once per contrast.
+            # ------------------------------------------------------------------
+            # STEP 6. The binary maps used for the two Dice metrics.
+            #
+            # (a) p < PTHR maps, for `dice` (act_ses-N_<contrast>.nii.gz):
+            #     p2dsetstat turns p < 0.05 two-sided into a t threshold, using
+            #     each session's own degrees of freedom; 3dcalc then marks
+            #     voxels with |t| above it as 1. These maps are not masked; the
+            #     mask is applied later by 3ddot -dodice. Made once per contrast.
+            # (b) cluster-corrected maps, for `dice_clust`
+            #     (clust_ses-N_<contrast>.nii.gz): see clust_map in SECTION 2.
+            #     Clustering is done in the whole-brain mask; each mask from
+            #     STEP 4 is applied afterwards by dice_pair, as for (a).
+            # ------------------------------------------------------------------
             THR1=$(${AFNI} "p2dsetstat -quiet -inset ${S1}'[${TSTAT}]' -pval ${PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
             THR2=$(${AFNI} "p2dsetstat -quiet -inset ${S2}'[${TSTAT}]' -pval ${PTHR} -2sided" 2>/dev/null | tail -n1 | awk '{print $1}')
             ACT1=${OUT}/act_${SES1}_${CON}.nii.gz
@@ -543,8 +816,6 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 echo "  WARN: ${CON} -- empty p2dsetstat threshold (thr1='${THR1}' thr2='${THR2}'); dice=NA" >&2
             fi
 
-            # Cluster-corrected binary maps (dice_clust), whole-brain clustering;
-            # the mask is applied afterwards by dice_pair, like the p<.05 maps.
             CL1=${OUT}/clust_${SES1}_${CON}.nii.gz
             CL2=${OUT}/clust_${SES2}_${CON}.nii.gz
             CLUST_OK=0
@@ -557,29 +828,42 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 fi
             fi
 
+            # ------------------------------------------------------------------
+            # STEP 7. The reliability metrics, inside each mask from STEP 4.
+            #
+            #   spatial_r   (beta and t)  3ddot -docor, Pearson r -> consistency
+            #   spatial_icc (beta)        ICC(2,1) absolute agreement, via irr
+            #   dice        (t)           Dice of the p < 0.05 maps
+            #   dice_clust  (t)           Dice of the cluster-corrected maps,
+            #                             plus each session's voxel count inside
+            #                             the mask (clust_nvox_ses-N), so empty
+            #                             maps (no surviving cluster) are
+            #                             visible in the table
+            # Both empty -> Dice 0 (see dice_pair). A metric that could not be
+            # computed is recorded as NA.
+            # ------------------------------------------------------------------
             for MSPEC in "${MASKS[@]}"; do
                 MTAG=${MSPEC%%:*}
                 M=${MSPEC#*:}
 
-                # spatial correlation (Pearson r) -- consistency
+                # spatial correlation (Pearson r)
                 R_BETA=$(afni_scalar  "r(beta) ${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}"  "3ddot -docor -mask ${M} ${S1}'[${COEF}]'  ${S2}'[${COEF}]'")
                 R_TSTAT=$(afni_scalar "r(t) ${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}"     "3ddot -docor -mask ${M} ${S1}'[${TSTAT}]' ${S2}'[${TSTAT}]'")
                 add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" beta  spatial_r "${MTAG}" "${R_BETA}"
                 add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat spatial_r "${MTAG}" "${R_TSTAT}"
 
-                # spatial ICC(2,1) absolute agreement (beta) -- via irr
+                # spatial ICC(2,1), absolute agreement (beta)
                 SPICC=$(spatial_icc "${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "${M}" "${S1}'[${COEF}]'" "${S2}'[${COEF}]'")
                 add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" beta spatial_icc "${MTAG}" "${SPICC}"
 
-                # Dice overlap of thresholded t-maps (both empty -> 0, see dice_pair)
+                # Dice of the p < 0.05 t-maps
                 DICE=NA
                 if [ "${DICE_OK}" -eq 1 ]; then
                     read -r DICE _ _ <<< "$(dice_pair "${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "${M}" "${ACT1}" "${ACT2}")"
                 fi
                 add_metric "${PARTICIPANT_ID}" "${TASK}" "${CON}" tstat dice "${MTAG}" "${DICE}"
 
-                # Cluster-corrected Dice + suprathreshold voxel counts per session
-                # (so empty maps -- no surviving cluster -- are visible in the TSV).
+                # Dice of the cluster-corrected t-maps + voxel counts per session
                 DICEC=NA; NC1=NA; NC2=NA
                 if [ "${CLUST_OK}" -eq 1 ]; then
                     read -r DICEC NC1 NC2 <<< "$(dice_pair "clust ${PARTICIPANT_ID}/${TASK}/${CON}/${MTAG}" "${M}" "${CL1}" "${CL2}")"
@@ -591,18 +875,26 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                 echo "  ${CON} [${MTAG}]: r(beta)=${R_BETA} r(t)=${R_TSTAT} sICC=${SPICC} dice=${DICE} dice_clust=${DICEC} (nvox ${NC1}/${NC2})"
             done
 
-            # --- scatter data (paired beta values, whole-brain) for plotting ---
-            # Columns: i j k ses1 ses2  -> ready for a scatter/regression plot.
+            # ------------------------------------------------------------------
+            # STEP 8. Files for looking at the data (whole-brain mask only).
+            #
+            # scatter_<contrast>.txt: 3dmaskdump writes one row per voxel in
+            #   the whole-brain mask with columns  i j k ses1 ses2  (voxel
+            #   indices, then the two sessions' betas), ready for a scatter plot.
+            # ses2_minus_ses1_<contrast>_Coef.nii.gz: the beta difference map
+            #   (ses-2 minus ses-1), for visual inspection.
+            # ------------------------------------------------------------------
             SCATTER=${OUT}/scatter_${CON}.txt
             rm -f "${SCATTER}"
             ${AFNI} "3dmaskdump -mask ${MASK} -o ${SCATTER} ${S1}'[${COEF}]' ${S2}'[${COEF}]'"
 
-            # --- difference map (ses2 - ses1) of the beta, for eyeballing ---
             ${AFNI} "3dcalc -overwrite -a ${S2}'[${COEF}]' -b ${S1}'[${COEF}]' -expr 'a-b' -prefix ${OUT}/ses2_minus_ses1_${CON}_Coef.nii.gz"
         done
     done
 done
 
+# Stop with an error if no comparison ran at all (see PROCESSED above). Note
+# that this also skips SECTIONS 5 and 6.
 if [ "${PROCESSED}" -eq 0 ]; then
     echo "ERROR: no subject/task comparison ran (all skipped or failed). Not a successful run." >&2
     exit 1
@@ -610,35 +902,46 @@ fi
 
 echo "Within-subject reproducibility complete (${PROCESSED} task-comparisons). Summary: ${SUMMARY}"
 
-# =============================================================================
-# GROUP VOXELWISE ICC(2,1)  —  AFNI 3dICC, across-subject reliability map
-# =============================================================================
-# Pools ALL subjects that have BOTH sessions for a task (subjects = targets, the
-# 2 sessions = repeated measurements) and fits, per voxel, the two-way random-
-# effects model  '1+(1|session)+(1|Subj)'  = ICC(2,1). Output is an ICC MAP per
-# task x contrast, plus a whole-mask median in reproducibility_icc_summary.tsv.
+
+# ==============================================================================
+# SECTION 5. LEVEL 2 — GROUP VOXELWISE ICC(2,1) WITH 3dICC
+# ------------------------------------------------------------------------------
+# Pools every participant who has BOTH sessions for a task (participants = the
+# things measured, the 2 sessions = the two measurements) and fits, in every
+# voxel, the two-way random-effects model  1+(1|session)+(1|Subj),  which is
+# ICC(2,1). Output: one ICC map per task x contrast, plus the median ICC inside
+# the mask in reproducibility_icc_summary.tsv.
 #
-# Inputs are the beta (Coef) maps, extracted to MNI-labelled NIfTI (like
-# second_level_afni.sh). The mask is the group mean_response activation ROI
-# (falls back to input coverage). Runs regardless of the participant args above
-# (the group is defined by whoever has both sessions on disk).
+# Inputs are the beta (Coef) maps, copied out to NIfTI and labelled as MNI space
+# (as second_level_afni.sh does). This section ignores the participant
+# arguments: the group is everyone on disk with both sessions.
 #
-# REMEMBER: high ICC == subjects' DIFFERENCES replicate across sessions, NOT
-# "the task reliably activates" (that is the group activation map). At small n
-# this map is very unstable -- see the loud warning below.
-# =============================================================================
+# REMEMBER: high ICC = people's DIFFERENCES from each other repeat across
+# sessions, NOT "the task reliably activates" (that is the group activation
+# map). With few participants this map is very unstable (see the warning below).
+# ==============================================================================
 echo "=============================================================="
 echo "GROUP ICC(2,1): voxelwise 3dICC across two-session subjects"
 echo "=============================================================="
 
+# From here on GROUP_OUT means THIS script's group folder, <REPRO_OUT>/group
+# (not second_level_afni.sh's afni_group folder from SECTION 1a).
 GROUP_OUT=${REPRO_OUT}/group
 mkdir -p "${GROUP_OUT}/inputs"
 
-# Fresh group summary each run (recomputed over everyone with both sessions).
+# Start a fresh group summary table every run (it is recomputed from everyone
+# with both sessions).
 printf 'task\tcontrast\tn\tmetric\tvalue\n' > "${ICC_SUMMARY}"
 
 for TASK in "${TASKS[@]}"; do
-    # Discover subjects with BOTH ses-1 and ses-2 REML buckets for this task.
+
+    # ------------------------------------------------------------------
+    # STEP 9. Find every participant with both sessions for this task.
+    #
+    # A participant is included if both sessions' REML buckets exist and
+    # neither session is listed in exclusions.tsv. At least 2 are needed;
+    # with fewer than 10 a warning is printed.
+    # ------------------------------------------------------------------
     ICC_SUBS=()
     for d in "${AFNI_OUT}"/sub-*; do
         [ -d "${d}" ] || continue
@@ -664,7 +967,14 @@ for TASK in "${TASKS[@]}"; do
     for CON in "${CONTRASTS[@]}"; do
         COEF="${CON}#0_Coef"
 
-        # Extract each subject/session beta to MNI-labelled NIfTI; build data table.
+        # ------------------------------------------------------------------
+        # STEP 10. Copy each participant x session beta map out to NIfTI.
+        #
+        # 3dbucket copies the <contrast>#0_Coef sub-brick to its own file;
+        # 3drefit -space MNI labels it as MNI space. Each file is added to the
+        # 3dICC data table (DT) as:  participant  session  file
+        # (the session label is written ses1 / ses2, without the dash).
+        # ------------------------------------------------------------------
         DT=""
         for sid in "${ICC_SUBS[@]}"; do
             for SES in "${SES1}" "${SES2}"; do
@@ -677,8 +987,17 @@ for TASK in "${TASKS[@]}"; do
             done
         done
 
-        # Group mask: full coverage of the inputs, intersected with the group
-        # mean_response activation ROI when available.
+        # ------------------------------------------------------------------
+        # STEP 11. Group mask, 3dICC, and the median ICC.
+        #
+        # Group mask: voxels that are non-zero in EVERY input file in
+        # group/inputs for this task and contrast (3dmask_tool -frac 1.0),
+        # then intersected with the group activation mask (same p < 0.05
+        # recipe as STEP 2) when the group mean_response map exists.
+        # 3dICC: model 1+(1|session)+(1|Subj) = ICC(2,1), using
+        # SLURM_CPUS_PER_TASK cores (4 if not set). If it fails, NA is recorded.
+        # Median: 3dBrickStat -median of sub-brick [0] inside the mask.
+        # ------------------------------------------------------------------
         GMASK=${GROUP_OUT}/groupmask_task-${TASK}_${CON}.nii.gz
         rm -f "${GMASK}"
         ${AFNI} "3dmask_tool -overwrite -input ${GROUP_OUT}/inputs/*_task-${TASK}_${CON}_Coef.nii.gz -frac 1.0 -prefix ${GMASK}"
@@ -706,8 +1025,8 @@ for TASK in "${TASKS[@]}"; do
             continue
         fi
 
-        # Median ICC within the mask. 3dICC output sub-brick [0] is the ICC value
-        # (sub-brick [1] is its F-stat). Verify labels once with: 3dinfo ICC_*+tlrc
+        # Median ICC inside the mask. The code assumes 3dICC's sub-brick [0] is
+        # the ICC and [1] its F-statistic; confirm once with: 3dinfo -label ICC_*+tlrc
         MED=$(${AFNI} "3dBrickStat -median -mask ${GMASK} ${ICC_OUT}+tlrc'[0]'" 2>/dev/null | tail -n1 | awk '{print $NF}')
         [ -z "${MED}" ] && MED=NA
         printf '%s\t%s\t%d\t%s\t%s\n' "${TASK}" "${CON}" "${n}" median_icc "${MED}" >> "${ICC_SUMMARY}"
@@ -715,25 +1034,31 @@ for TASK in "${TASKS[@]}"; do
     done
 done
 
-# =============================================================================
-# WITHIN- vs BETWEEN-SUBJECT DICE  (Gorgolewski et al. 2013, NeuroImage 69:231)
-# =============================================================================
-# A within-subject Dice only means something relative to how much ANY two people
-# overlap (everyone activates visual cortex). Following Gorgolewski et al.:
-#   within  = subject X ses-1 vs subject X ses-2
-#   between = every pair of DIFFERENT subjects, within the same session
-#             (ses-1 pairs and ses-2 pairs), later averaged per task
-# A task is "reliable" at the individual level if within > between. The test
-# (percentile bootstrap of the Harrell-Davis median) is in
-# dice_within_vs_between.R, which reads the TSV written here.
+
+# ==============================================================================
+# SECTION 6. WITHIN- vs BETWEEN-PERSON DICE  (Gorgolewski et al. 2013,
+#            NeuroImage 69:231)
+# ------------------------------------------------------------------------------
+# A within-person Dice only means something compared with how much ANY two
+# people overlap (everyone activates visual cortex, for example). Following
+# Gorgolewski et al.:
+#   within  = participant X ses-1 vs participant X ses-2
+#   between = every pair of DIFFERENT participants, within the same session
+#             (ses-1 pairs and ses-2 pairs)
+# A task is reliable at the individual level if within > between. The test
+# (dice_within_vs_between.R: between values averaged per task/contrast/variant/
+# mask, then a percentile bootstrap of the Harrell-Davis median of within minus
+# between) reads the table written here.
 #
-# All comparisons for a task use ONE common mask (intersection of every
-# subject's mask_both; optionally ∩ the group activation ROI), so within and
-# between Dice are computed over the same voxels. That is why these within values
-# can differ slightly from the per-subject `dice` rows above, which use each
-# subject's own mask. Done for both binary-map variants: p05 (act_*) and
-# clust (clust_*). Both-empty pairs score 0, as in dice_pair.
-# =============================================================================
+# All comparisons for a task use ONE common mask (the intersection of every
+# participant's mask_both, and optionally that intersected with the group
+# activation mask), so within and between Dice cover the same voxels. That is
+# why these within values can differ slightly from the per-participant `dice`
+# rows in SECTION 4, which use each participant's own mask. Done for both kinds
+# of binary map from STEP 6: p05 (act_*) and clust (clust_*). Both-empty pairs
+# score 0, as in dice_pair. This section uses every participant with SECTION 4
+# output on disk, not only the ones named on the command line.
+# ==============================================================================
 echo "=============================================================="
 echo "WITHIN vs BETWEEN-SUBJECT DICE (Gorgolewski et al. 2013)"
 echo "=============================================================="
@@ -743,10 +1068,18 @@ printf 'task\tcontrast\tvariant\tmask\tkind\tsession\tsubjA\tsubjB\tdice\n' > "$
 WB_DIR=${REPRO_OUT}/group/dice_wb
 mkdir -p "${WB_DIR}"
 
-# Runs INSIDE the container: one AFNI process per comparison instead of one
-# container start per comparison (thousands of pairs at n=10).
+# ------------------------------------------------------------------
+# STEP 12. Write dice_batch.sh, a small helper that runs INSIDE the image.
+#
+# There are thousands of pairs at n=10. Starting the container once per pair
+# would be slow, so the whole list of pairs is handed to this helper, which
+# runs once per list. For each pair it counts the voxels of each map inside
+# the mask (3dBrickStat), sets Dice = 0 if both are empty, and otherwise
+# computes the Dice (3ddot -dodice); a missing map gives NA.
+#   arguments   : mask  pair_list
 #   input lines : kind session subjA subjB fileA fileB
 #   output lines: kind session subjA subjB dice
+# ------------------------------------------------------------------
 DICE_BATCH=${WB_DIR}/dice_batch.sh
 cat > "${DICE_BATCH}" <<'EOF'
 #!/bin/bash
@@ -767,6 +1100,18 @@ done < "$2"
 EOF
 
 for TASK in "${TASKS[@]}"; do
+
+    # ------------------------------------------------------------------
+    # STEP 13. Participants and common masks for this task.
+    #
+    # Participants: every <REPRO_OUT>/sub-*/task-<task> folder that has a
+    # mask_both.nii.gz (i.e. STEP 1 ran for it, in this run or an earlier
+    # one), minus any run listed in exclusions.tsv. At least 2 are needed.
+    # Masks: "wholebrain" = voxels in EVERY participant's mask_both
+    # (3dmask_tool -frac 1.0); "activation" = that, intersected with the
+    # group activation mask (same p < 0.05 recipe as STEP 2), when the group
+    # mean_response map exists.
+    # ------------------------------------------------------------------
     WB_SUBS=()
     for d in "${REPRO_OUT}"/sub-*/task-${TASK}; do
         sid=$(basename "$(dirname "${d}")")
@@ -781,7 +1126,6 @@ for TASK in "${TASKS[@]}"; do
     fi
     echo "within/between ${TASK}: n=${n} (${WB_SUBS[*]})"
 
-    # Common whole-brain mask, and its intersection with the group activation ROI.
     WB_MASK=${WB_DIR}/mask_wholebrain_task-${TASK}.nii.gz
     WB_INPUTS=""
     for sid in "${WB_SUBS[@]}"; do WB_INPUTS="${WB_INPUTS} ${REPRO_OUT}/${sid}/task-${TASK}/mask_both.nii.gz"; done
@@ -801,6 +1145,18 @@ for TASK in "${TASKS[@]}"; do
         fi
     fi
 
+    # ------------------------------------------------------------------
+    # STEP 14. List every pair and compute its Dice.
+    #
+    # For each contrast and each map variant (p05 = act_*, clust = clust_*):
+    #   - one "within" line per participant (ses-1 vs ses-2), session label
+    #     "ses1-ses2"
+    #   - one "between" line per pair of different participants, for ses-1
+    #     and again for ses-2
+    # The list goes to dice_batch.sh once per mask, and each result line is
+    # appended to dice_within_between.tsv with the task, contrast, variant
+    # and mask in front.
+    # ------------------------------------------------------------------
     for CON in "${CONTRASTS[@]}"; do
         for VAR in p05 clust; do
             case "${VAR}" in p05) MAPPRE=act ;; clust) MAPPRE=clust ;; esac
@@ -832,6 +1188,10 @@ done
 echo "  within/between Dice -> ${DICE_WB}"
 echo "  test it with: Rscript dice_within_vs_between.R ${DICE_WB}"
 
+
+# ==============================================================================
+# SECTION 7. FINAL REPORT
+# ==============================================================================
 echo "=============================================================="
 echo "Reliability run complete."
 echo "  within-subject metrics : ${SUMMARY}   (mask = activation | wholebrain)"
@@ -841,12 +1201,13 @@ echo "  NOTE: group ICC needs many subjects to be meaningful; small-n results"
 echo "        above are placeholders and will stabilize as the sample grows."
 echo "=============================================================="
 
-# =============================================================================
-# ===== OPTIONAL WITHIN-SUBJECT ROLL-UP: mean +/- SD across subjects ==========
-# =============================================================================
-# Aggregates reproducibility_summary.tsv across processed subjects into a per-
-# (task, contrast, map, metric, mask) table. Uncomment once several subjects
-# exist. Value is column 7; keys are columns 2..6 (mask included).
+# ------------------------------------------------------------------------------
+# OPTIONAL (DISABLED): LEVEL-1 ROLL-UP, mean +/- SD across participants
+# ------------------------------------------------------------------------------
+# Averages reproducibility_summary.tsv across participants into one row per
+# (task, contrast, map, metric, mask). Uncomment once several participants
+# exist. The value is column 7; the grouping keys are columns 2-6 (mask
+# included). NA cells are skipped.
 #
 # GROUP_SUMMARY=${REPRO_OUT}/reproducibility_group_summary.tsv
 # awk -F'\t' '

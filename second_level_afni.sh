@@ -1,4 +1,14 @@
 #!/bin/bash
+# ==============================================================================
+# SLURM JOB SETTINGS
+# ------------------------------------------------------------------------------
+# Slurm reads these #SBATCH lines BEFORE the script runs, so they must be literal
+# values (shell variables do not expand here).
+#   8 cores / 32 GB / 8 h : one job runs the whole group analysis. The 8 cores
+#                           are passed to 3dttest++ -Clustsim (see NTHR).
+#   --chdir               : run inside scratch, so any stray relative-path file
+#                           lands there instead of in the home directory.
+# ==============================================================================
 #SBATCH --job-name=spirituality_grouplvl
 #SBATCH --output=/home/bradenf4/spirituality_fmri/logs/%x_%j.out
 #SBATCH --error=/home/bradenf4/spirituality_fmri/logs/%x_%j.err
@@ -9,142 +19,279 @@
 #SBATCH --time=8:00:00
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=bradenfairbanks@gmail.com
-# Run the job in scratch, not the submit dir. #SBATCH is parsed by Slurm before
-# the shell runs, so this must be a literal absolute path -- ${WORK_ROOT} would
-# not expand. Keeps stray relative-path output off /home.
 #SBATCH --chdir=/nobackup/autodelete/usr/bradenf4/work/Spirituality
 
-# =============================================================================
-# Spirituality fMRI — SECOND-LEVEL (GROUP) ANALYSIS (AFNI)
+# ==============================================================================
+# second_level_afni.sh — SECOND-LEVEL (GROUP) ANALYSIS OF THE RATING EFFECT
+# ==============================================================================
 #
-# Aggregates the first-level parametric-modulation results across subjects.
-# The first level (first_level_afni.sh) fit one 3dDeconvolve/3dREMLfit GLM per
-# subject/session/task with -stim_times_AM2, yielding per GLM:
-#     rating_slope  = parametric SLOPE of BOLD vs the 1-4 "felt the Spirit"
-#                     rating  (PRIMARY result of interest)
-#     mean_response = overall activation (sanity / localizer)
+# WHAT THIS SCRIPT DOES
+#   first_level_afni.sh fit one GLM per participant, session and task. Each GLM
+#   gives two effects (as a beta "Coef" map and a t-statistic "Tstat" map):
+#     rating_slope  : how much the BOLD response goes up per "felt the Spirit"
+#                     rating point (1-4). THE PRIMARY RESULT.
+#     mean_response : the average BOLD response to the task's trials (a sanity
+#                     check / localizer).
+#   This script combines those maps across participants. It asks, voxel by
+#   voxel: is the effect different from zero in the group (per task), and does
+#   the rating slope differ between tasks? It also builds the tables needed to
+#   correct the group maps for multiple comparisons (cluster-size thresholds).
 #
-# This script:
-#   STEP 0  Discover which <sub>/<ses>/task-<TASK>_stats_REML+tlrc exist.
-#   STEP 1  Extract slope + mean Coef/Tstat to NIfTI (MNI), and for subjects
-#           with >1 session, fixed-effects-average their sessions so each
-#           subject contributes ONE value per task.
-#   STEP 2  Build a group brain mask.
-#   STEP 3  3dMEMA one-sample per task  (slope primary, mean as sanity).
-#   STEP 4  3dMEMA between-task slope contrasts.
-#   STEP 5  3dttest++ (same one-sample + paired between-task) with -Clustsim.
-#   STEP 6  Cluster correction for the 3dMEMA maps (3dFWHMx -> 3dClustSim).
+# WHERE IT SITS IN THE PIPELINE
+#   Before: first_level_afni.sh  (per-run GLM; its REML stats and residuals)
+#   After : trr_export_afni.sh   (uses this script's mean_response 3dMEMA maps
+#                                 and cluster table to define ROIs)
+#           promote_to_archive.sh (copies the results to archive; this script
+#                                 no longer does that, see STEP 7)
 #
-# The subject list is NOT hard-coded: whatever first-level output exists is
-# picked up automatically. Re-run after sub-02/sub-04 (and more sessions)
-# finish and the group grows on its own.
+# STEPS
+#   0. Find every first-level result on disk (skipping excluded runs).
+#   1. Pull out the slope and mean Coef/Tstat maps. If a participant has more
+#      than one session of a task, average the sessions, so each participant
+#      gives ONE map per task and effect.
+#   2. Build the group brain mask.
+#   3. 3dMEMA one-sample test per task (slope = primary, mean = sanity check).
+#   4. 3dMEMA between-task slope contrasts (task X minus task Y).
+#   5. 3dttest++ versions of STEPs 3 and 4 (with -Clustsim when n is big enough).
+#   6. Cluster-size table for the 3dMEMA maps (3dFWHMx -> 3dClustSim).
+#   7. (Nothing is copied to archive; this step only prints a reminder.)
+#   The participant list is NOT hard-coded: whatever first-level output exists
+#   is used, so re-running after more participants/sessions finish grows the
+#   group automatically.
 #
-# NOTE on space: the first-level BOLD is in MNI152NLin2009cAsym and, since
-# first_level_afni.sh restores the MNI tag that tedana drops, AFNI now reads the
-# buckets as space=MNI/view=+tlrc. Extracting to NIfTI keeps that sform; 3drefit -space MNI
-# then sets the label so clustering / whereami work.
+# INPUTS
+#   first-level stats    : <AFNI_OUT>/sub-NN/ses-N/task-T/sub-NN_ses-N_task-T_stats_REML+tlrc
+#                            sub-bricks rating_slope#0_Coef / _Tstat,
+#                                       mean_response#0_Coef / _Tstat
+#   first-level residuals: <AFNI_OUT>/sub-NN/ses-N/task-T/sub-NN_ses-N_task-T_errts_REML+tlrc
+#   exclusions           : <EXCLUSIONS_TSV> (+ <PARTICIPANTS_TSV> to map sub-NN -> BYV id)
 #
-# Run with:  sbatch second_level_afni.sh
-# =============================================================================
+# OUTPUTS, all in <GROUP_OUT>/
+#   inputs/sub-NN_task-T_<slope|mean>_Coef.nii.gz   one per participant x task x effect
+#   inputs/sub-NN_task-T_<slope|mean>_T.nii.gz
+#   inputs/contrast_X_vs_Y/sub-NN_bDelta.nii.gz, sub-NN_tDelta.nii.gz
+#   mask/group_mask.nii.gz                          the group mask
+#   mask/sub-NN_ses-N_task-T_modelled.nii.gz        each run's modelled voxels
+#   mema/mema_T_slope+tlrc, mema/mema_T_mean+tlrc   STEP 3 (T = task)
+#   mema/mema_X_vs_Y_slope+tlrc                     STEP 4
+#   ttest/ttest_T_<slope|mean>+tlrc, ttest/ttest_X_vs_Y_slope+tlrc   STEP 5
+#   clustsim/mema_clustsim.NN{1,2,3}_{1sided,2sided,bisided}.1D      STEP 6
+#   clustsim/acf_params.txt                         per-run ACF estimates (STEP 6)
+#
+# HOW TO RUN
+#   sbatch second_level_afni.sh
+#   Re-running overwrites the outputs in place.
+#
+# METHODS SUMMARY (the exact values used below)
+#   Effects        : rating_slope (primary) and mean_response, from the 3dREMLfit
+#                    first-level fits; Coef and Tstat sub-bricks of each.
+#   Exclusions     : runs listed in exclusions.tsv are skipped everywhere.
+#   Sessions       : a participant with several sessions of a task is reduced
+#                    to one map per task. Beta = plain (unweighted) mean of the
+#                    session betas. Each session's squared standard error is
+#                    SE^2 = (beta / t)^2 (set to 1e6 where t = 0); the combined
+#                    t = mean beta / sqrt(mean(SE^2) / n_sessions).
+#   Group mask     : voxels with non-zero first-level betas (rating_slope AND
+#                    mean_response) in EVERY run that enters the group
+#                    analysis (every participant, session and task), i.e. the
+#                    voxels the first-level GLM modelled with data in all of
+#                    them (fMRIPrep brain mask AND voxels with data at every
+#                    time point, per run). No group voxel is zero in any input,
+#                    so no test treats a missing voxel as a real 0.
+#   3dMEMA         : mixed-effects meta-analysis, which uses each participant's
+#                    beta AND t (so less precise participants count less).
+#                    One-sample per task and effect. Zero = missing data
+#                    (-missing_data 0). Other options at 3dMEMA defaults
+#                    (this includes the Hartung-Knapp adjustment).
+#                    Run only when n >= 2.
+#   Task contrasts : scripture - architecture, FHS - architecture,
+#                    scripture - FHS, on the rating slope. Per participant
+#                    (those with both tasks): difference beta = bX - bY;
+#                    difference t = (bX - bY) / sqrt(SE_X^2 + SE_Y^2); then a
+#                    one-sample 3dMEMA.
+#   3dttest++      : same one-sample tests (on betas only) and paired
+#                    between-task slope tests. -Clustsim (randomization-based
+#                    cluster tables; makes the output z-scores) is added only
+#                    when there are >= 14 datasets in total.
+#   Cluster table  : spatial smoothness (ACF model a, b, c) estimated with
+#                    3dFWHMx -acf on every included first-level REML residual
+#                    time series inside the group mask, averaged over runs;
+#                    3dClustSim with voxelwise p = 0.001 and alpha = 0.05.
+# ==============================================================================
 
-set -e
+set -e    # stop at the first command that fails
+
 
 # ==============================================================================
-# CONFIGURATION
+# SECTION 1. SETTINGS
+# ------------------------------------------------------------------------------
+# Every path and parameter this script uses is defined here. Settings marked
+# [shared] also appear in other scripts and must match them; after editing one,
+# run  bash check_settings.sh  to confirm every copy still agrees.
 # ==============================================================================
 
-# --- All paths come from config.sh; edit there, not here ---
-# Absolute form on purpose: under sbatch, $0 points at a spool copy, not this repo.
-# --- Locate config.sh ---------------------------------------------------------
-# Under sbatch, BOTH $0 and ${BASH_SOURCE[0]} point at Slurm's spool copy
-# (/var/spool/slurmd/job<N>/slurm_script), NOT at this repo. Verified 2026-08-21
-# with probe job 13292417. Deriving the path from BASH_SOURCE alone therefore
-# fails inside every batch job — the script dies before doing any work.
-#
-# Resolved in order of decreasing reliability:
-#   $PIPELINE_CONFIG   explicit override (used by audit_paths.sh fixture tests)
-#   $SLURM_SUBMIT_DIR  where sbatch was invoked — correct for the normal workflow
-#   dirname BASH_SOURCE  correct when run directly with bash, wrong under sbatch
-#   the install path   last-resort absolute
-CONFIG=""
-for _c in "${PIPELINE_CONFIG:-}" \
-          "${SLURM_SUBMIT_DIR:-}/config.sh" \
-          "${SLURM_SUBMIT_DIR:-}/../config.sh" \
-          "$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/config.sh" \
-          "/home/bradenf4/spirituality_fmri/scripts/config.sh"; do
-    case "${_c}" in ""|"/config.sh"|"/../config.sh") continue ;; esac
-    [ -f "${_c}" ] && { CONFIG="${_c}"; break; }
-done
-[ -n "${CONFIG}" ] || { echo "FATAL: cannot locate config.sh (set PIPELINE_CONFIG)" >&2; exit 1; }
-source "${CONFIG}"
-# Provides: DERIV AFNI_OUT FMRIPREP_OUT GROUP_OUT FINAL_DIR RLIB AFNI_SIF
-#           LOGS BIND_ARGS
-AFNI_FIRSTLVL=${AFNI_OUT}
+# --- 1a. Where the data live --------------------------------------------------
+# Three storage areas on the BYU supercomputer:
+#   /home/bradenf4                     backed up, never purged: code, logs
+#   /nobackup/autodelete/usr/bradenf4  scratch, NOT backed up, purged after 12
+#                                      weeks unused: everything this job reads/writes
+#   /nobackup/archive/usr/bradenf4     raw data (read only) and archived results
+AFNI_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_firstlvl     # [shared] input: first-level results
+GROUP_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_group       # [shared] output
+FINAL_DIR=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/final    # [shared] archive (not written here)
+PARTICIPANTS_TSV=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/rawdata/participants.tsv  # [shared]
+EXCLUSIONS_TSV=/home/bradenf4/spirituality_fmri/scripts/exclusions.tsv                 # [shared] runs to skip
+LOGS=/home/bradenf4/spirituality_fmri/logs                                             # [shared]
+PROJ_HOME=/home/bradenf4/spirituality_fmri     # project home (only used in the final reminder message)
 
-# Everything computes on SCRATCH; the small final maps are persisted to ARCHIVE in
-# STEP 7. This is what BYU RC asks for — "Archive storage should generally NOT be
-# used directly from batch jobs." STEP 7 complements promote_to_archive.sh, which
-# does the same job for the first-level buckets.
+AFNI_FIRSTLVL=${AFNI_OUT}                      # the name used for the first-level folder below
+
+# Archive folder for the group maps. NOT USED any more: STEP 7 used to copy the
+# results here; promote_to_archive.sh does that now. Kept for reference.
 GROUP_FINAL=${FINAL_DIR}/afni_group
 
-# 3dMEMA is an R program; the AFNI container's R (3.4.4) lacks its packages
-# (data.table, snow). RLIB now lives on /home (see config.sh), NOT on scratch or in
-# the group output tree: compute nodes have NO internet, so if the library is ever
-# purged it cannot be reinstalled from inside a job — it has to be redone from a
-# login node. /home is backed up and never purged.
+# Sub-folders of GROUP_OUT (created in SECTION 3).
+INPUTS=${GROUP_OUT}/inputs                     # per-participant maps (STEPs 1, 4)
+MASKDIR=${GROUP_OUT}/mask                      # masks (STEP 2)
+MEMADIR=${GROUP_OUT}/mema                      # 3dMEMA results (STEPs 3, 4)
+TTESTDIR=${GROUP_OUT}/ttest                    # 3dttest++ results (STEP 5)
+CLUSTDIR=${GROUP_OUT}/clustsim                 # smoothness + cluster tables (STEP 6)
+GROUPMASK=${MASKDIR}/group_mask.nii.gz         # the group mask (STEP 2)
 
-# --- Tasks ---
-TASKS=(scripture FHS architecture)
+# --- 1b. Software -------------------------------------------------------------
+# AFNI runs inside an Apptainer image. The image only sees folders that are
+# explicitly "bound" into it, so all three storage areas are bound.
+# 3dMEMA is an R program. Its R packages (data.table, snow) are INSIDE this
+# image; compute nodes have no internet, so nothing can be installed at run
+# time. SECTION 3 checks that the packages are there.
+AFNI_SIF=/apps/afni/26.3.04.sif                                                        # [shared] AFNI 26.3.04
+BIND_ARGS="--bind /home/bradenf4:/home/bradenf4 --bind /nobackup/autodelete/usr/bradenf4:/nobackup/autodelete/usr/bradenf4 --bind /nobackup/archive/usr/bradenf4:/nobackup/archive/usr/bradenf4"  # [shared]
+APPTAINER_MODULE=apptainer/1.3.6-qycanb2                                               # [shared]
 
-# --- Between-task slope contrasts (X:Y  ->  X minus Y) ---
+# --- 1c. Analysis parameters --------------------------------------------------
+# Tasks, by their BIDS labels.
+TASKS=(scripture FHS architecture)                                                     # [shared]
+
+# Between-task slope contrasts, written X:Y, meaning "X minus Y" (STEPs 4, 5).
 BETWEEN_TASK_PAIRS=(scripture:architecture FHS:architecture scripture:FHS)
 
-# --- Sub-brick labels inside <PREFIX>_stats_REML (GLT results) ---
-SLOPE_COEF="rating_slope#0_Coef"      # primary
-SLOPE_T="rating_slope#0_Tstat"
-MEAN_COEF="mean_response#0_Coef"      # sanity
-MEAN_T="mean_response#0_Tstat"
+# Sub-brick labels inside each first-level <PREFIX>_stats_REML+tlrc
+# (they are the GLT results named in first_level_afni.sh STEP 5).
+SLOPE_COEF="rating_slope#0_Coef"      # primary: beta of the rating slope
+SLOPE_T="rating_slope#0_Tstat"        #          its t-statistic
+MEAN_COEF="mean_response#0_Coef"      # sanity:  beta of the mean response
+MEAN_T="mean_response#0_Tstat"        #          its t-statistic
 
-# Uncorrected voxelwise p used to derive the ClustSim cluster-size table.
+# Voxelwise (uncorrected) p-value used to build the 3dClustSim cluster-size
+# table (STEP 6). trr_export_afni.sh uses the same value (0.001).
 CLUST_PTHR=0.001
 
-# CPUs for the -Clustsim / 3dClustSim randomization (SLURM alloc, else 4).
+# Number of parallel jobs for 3dttest++ -Clustsim: the CPUs Slurm gave this job
+# (8, from #SBATCH --cpus-per-task), or 4 if run outside Slurm.
 NTHR=${SLURM_CPUS_PER_TASK:-4}
 
+
+# ==============================================================================
+# SECTION 2. HELPER FUNCTIONS
 # ==============================================================================
 
-module load apptainer/1.3.6-qycanb2
-mkdir -p "${RLIB}"
-# Bind both archive (source data) and autodelete (fast scratch) into the
-# container, and expose the persistent R library so 3dMEMA finds its packages.
-AFNI="apptainer exec ${BIND_ARGS} --env R_LIBS_USER=${RLIB} ${AFNI_SIF} bash -c"
+# byv_for_sub sub-NN  ->  prints that participant's BYV id (e.g. 0AK1RT).
+# BIDS labels participants sub-NN (numbered in scan-date order), but the lab's
+# records (and exclusions.tsv) use the BYV id. participants.tsv maps one to the
+# other via its 'participant_id' and 'byv_id' columns.
+# (The awk variable is 'want', not 'sub': sub() is a built-in awk function.)
+byv_for_sub() {
+    awk -F'\t' -v want="$1" '
+        NR==1 { for (i=1;i<=NF;i++){ if($i=="participant_id")p=i; if($i=="byv_id")b=i}; next }
+        $p==want { print $b; exit }
+    ' "${PARTICIPANTS_TSV}"
+}
 
-# --- Precondition: 3dMEMA's R packages must already be in RLIB ---
-# This used to try install.packages() right here. That can never work: compute
-# nodes have NO internet, so CRAN is unreachable from inside a job. Check and
-# fail fast with a pointer to the login-node installer instead of dying later,
-# deep inside 3dMEMA, with an opaque R error.
+# is_excluded sub-NN ses-N task  ->  succeeds (and prints the reason) if that run
+# is listed in exclusions.tsv. That table has one row per excluded run:
+#   byv_id  session  task  reason  date_added      ("*" = every session / task)
+# Currently: 1VK4L2 ses-1, all tasks (asleep for most of the session).
+is_excluded() {                                                                        # [shared]
+    local byv
+    [ -f "${EXCLUSIONS_TSV}" ] || return 1
+    case "$1" in sub-*) byv=$(byv_for_sub "$1") ;; *) byv=$1 ;; esac
+    [ -n "${byv}" ] || return 1
+    awk -F'\t' -v b="${byv}" -v s="$2" -v t="$3" '
+        NR==1 || /^#/ { next }
+        $1==b && ($2==s || $2=="*") && ($3==t || $3=="*") { print $4; found=1; exit }
+        END { exit(found ? 0 : 1) }' "${EXCLUSIONS_TSV}"
+}
+
+# stats_dset sub-NN ses-N task  ->  prints the path of that run's first-level
+# REML stats dataset (without the .HEAD/.BRIK ending).
+stats_dset() {  # <sub> <ses> <task>
+    echo "${AFNI_FIRSTLVL}/$1/$2/task-$3/$1_$2_task-$3_stats_REML+tlrc"
+}
+
+# extract_brick <stats_dset> <label> <out.nii.gz>
+# Copies ONE sub-brick, chosen by its label (e.g. rating_slope#0_Coef), out of a
+# stats dataset into its own NIfTI file (3dbucket). Any old copy is deleted first.
+extract_brick() {  # <stats_dset> <label> <out.nii.gz>
+    local dset="$1" lab="$2" out="$3"
+    rm -f "${out}"
+    ${AFNI} "3dbucket -prefix ${out} ${dset}'[${lab}]'"
+}
+
+# subs_with <task> <slope|mean>  ->  prints the participants that have an
+# extracted Coef map for that task and effect. A participant must ALSO have had
+# sessions found in STEP 0, so a stale map left in inputs/ by an earlier run of
+# a since-excluded run is never pooled. (Used by STEPs 3 and 5 one-sample tests.)
+subs_with() {  # <task> <effect>
+    local task="$1" eff="$2" s
+    for s in "${SUBJECTS[@]}"; do
+        # Require sessions discovered in STEP 0 too, so a stale input file left by
+        # an earlier run of a since-excluded run is never pooled.
+        [ -n "${SESS[${s} ${task}]}" ] || continue
+        [ -f "${INPUTS}/${s}_task-${task}_${eff}_Coef.nii.gz" ] && echo "${s}"
+    done
+}
+
+
+# ==============================================================================
+# SECTION 3. SETUP AND CHECKS
+# ==============================================================================
+
+module load "${APPTAINER_MODULE}"
+
+# Every AFNI command below runs as:  ${AFNI} "<commands>"
+# --cleanenv: the host's environment (e.g. a stray R_LIBS from a login shell) is
+# NOT passed into the image, so it cannot override the image's R packages. Every
+# variable a command needs is filled in on the host before the command string
+# reaches the image. (This script does not set AFNI's overwrite option; instead
+# it deletes each old output with rm -f before remaking it.)
+AFNI="apptainer exec --cleanenv ${BIND_ARGS} ${AFNI_SIF} bash -c"
+
+# Check that the image has 3dMEMA's R packages. This fails early with a clear
+# message instead of deep inside 3dMEMA with an unclear R error.
+# (The ERROR text below still says "config.sh"; AFNI_SIF is now set in SECTION 1b.)
 if ! ${AFNI} "Rscript -e 'q(status=length(setdiff(c(\"data.table\",\"snow\"), rownames(installed.packages()))))'"; then
-    echo "ERROR: 3dMEMA's R packages (snow, data.table) are missing from ${RLIB}."
-    echo
-    echo "They cannot be installed from here — compute nodes have no internet."
-    echo "Run this once on a LOGIN NODE, then resubmit:"
-    echo "    bash ${PROJ_HOME}/scripts/setup_rlib.sh"
+    echo "ERROR: 3dMEMA's R packages (snow, data.table) are missing from ${AFNI_SIF}."
+    echo "Check that AFNI_SIF in config.sh points at the R-enabled image (see container_request.md)."
     exit 1
 fi
 
 mkdir -p "${LOGS}" "${GROUP_OUT}"/{inputs,mask,mema,ttest,clustsim}
-INPUTS=${GROUP_OUT}/inputs
-MASKDIR=${GROUP_OUT}/mask
-MEMADIR=${GROUP_OUT}/mema
-TTESTDIR=${GROUP_OUT}/ttest
-CLUSTDIR=${GROUP_OUT}/clustsim
-GROUPMASK=${MASKDIR}/group_mask.nii.gz
+
 
 # ==============================================================================
-# STEP 0 — Discover available first-level stats
-# Build SESS["<sub> <task>"] = "ses-1 ses-2 ..."  and a subject list.
+# SECTION 4. MAIN WORK
 # ==============================================================================
+
+# ------------------------------------------------------------------------------
+# STEP 0. Find every first-level result on disk.
+#
+# Looks for <AFNI_OUT>/sub-*/ses-*/task-*/*_stats_REML+tlrc.HEAD and records:
+#   SESS["sub-NN task"] = the sessions found for that participant and task
+#                         (e.g. " ses-1 ses-2")
+#   SUBJECTS            = every participant found, sorted
+# Runs in exclusions.tsv are skipped: their outputs may still be on disk from
+# before they were excluded.
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 0: discovering first-level stats under ${AFNI_FIRSTLVL}"
 echo "=============================================================="
@@ -190,27 +337,34 @@ for SUB in "${SUBJECTS[@]}"; do
     done
 done
 
-# Path to a first-level stats dataset for a given sub/ses/task.
-stats_dset() {  # <sub> <ses> <task>
-    echo "${AFNI_FIRSTLVL}/$1/$2/task-$3/$1_$2_task-$3_stats_REML+tlrc"
-}
-
-# ==============================================================================
-# STEP 1 — Extract + session-average -> one Coef/Tstat per subject x task
-# For each effect writes:
-#   inputs/<sub>_task-<TASK>_<effect>_Coef.nii.gz
-#   inputs/<sub>_task-<TASK>_<effect>_T.nii.gz
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# STEP 1. Extract the maps, and average sessions -> one map per participant x
+#         task x effect.
+#
+# For each participant, task and effect (slope, mean) this writes:
+#   inputs/<sub>_task-<TASK>_<effect>_Coef.nii.gz   the beta
+#   inputs/<sub>_task-<TASK>_<effect>_T.nii.gz      its t-statistic
+#
+# One session : the Coef and Tstat sub-bricks are copied out as they are.
+# Two or more : the sessions are combined ("fixed-effects" average):
+#   beta_avg = mean of the session betas (plain mean, not weighted)
+#   SE_i^2   = (beta_i / t_i)^2   the squared standard error of session i,
+#              recovered from beta and t (since t = beta / SE). Where t_i = 0
+#              the SE cannot be recovered, so SE_i^2 is set to 1e6, which drives
+#              the combined t toward 0.
+#   SE2_mean = mean of the SE_i^2
+#   t_avg    = beta_avg / sqrt(SE2_mean / n)   (n = number of sessions; this is
+#              the SE of a mean of n independent estimates). Where SE2_mean is
+#              0 or below, t_avg is set to 0.
+#
+# Space label: the first-level data are in MNI152NLin2009cAsym, and
+# first_level_afni.sh labels them as MNI (3drefit -space MNI), so AFNI reads the
+# buckets as +tlrc. The NIfTI copies keep the MNI grid; 3drefit -space MNI is
+# applied again to each output so clustering and whereami treat them as MNI.
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 1: extracting + session-averaging per subject x task"
 echo "=============================================================="
-
-# Extract one labelled sub-brick from a stats dset to a NIfTI file.
-extract_brick() {  # <stats_dset> <label> <out.nii.gz>
-    local dset="$1" lab="$2" out="$3"
-    rm -f "${out}"
-    ${AFNI} "3dbucket -prefix ${out} ${dset}'[${lab}]'"
-}
 
 for SUB in "${SUBJECTS[@]}"; do
     for TASK in "${TASKS[@]}"; do
@@ -229,11 +383,10 @@ for SUB in "${SUBJECTS[@]}"; do
                 extract_brick "${D}" "${clab}" "${outC}"
                 extract_brick "${D}" "${tlab}" "${outT}"
             else
-                # Fixed-effects average across sessions.
-                #   betaAvg  = mean(b_i)
-                #   se2_i    = (b_i/t_i)^2      (t_i==0 -> 1e6, drives t->0)
-                #   se2mean  = mean(se2_i)
-                #   tAvg     = betaAvg / sqrt(se2mean/n)
+                # Fixed-effects average across sessions (formulas in the STEP 1 box).
+                #   a = Coef, b = Tstat in the first 3dcalc:
+                #   step(abs(b))*(a/(b+equals(b,0)))^2   -> (beta/t)^2 where t != 0
+                #   equals(b,0)*1000000                  -> 1e6 where t == 0
                 n="${#sessions[@]}"
                 tmp=${INPUTS}/.tmp_${SUB}_${TASK}_${eff}
                 rm -f "${tmp}"_*.nii.gz
@@ -259,6 +412,7 @@ for SUB in "${SUBJECTS[@]}"; do
                 ${AFNI} "3dMean -prefix ${se2mean} ${slist[*]}"
                 rm -f "${outC}" "${outT}"
                 ${AFNI} "3dcopy ${betaAvg} ${outC}"
+                # a = beta_avg, b = SE2_mean:  t = a * sqrt(n / b) where b > 0, else 0
                 ${AFNI} "3dcalc -a ${betaAvg} -b ${se2mean} \
                     -expr 'step(b)*a*sqrt(${n}/(b+1-step(b)))' \
                     -prefix ${outT}"
@@ -274,11 +428,31 @@ done
 echo "Extracted inputs:"
 ls -1 "${INPUTS}"/*_Coef.nii.gz 2>/dev/null | sed 's/^/  /'
 
-# ==============================================================================
-# STEP 2 — Group brain mask
-# Primary: intersection of fMRIPrep MNI brain masks (one per subject).
-# Fallback: coverage of the extracted slope Coef maps.
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# STEP 2. Build the group brain mask.
+#
+# The group mask = voxels the first-level GLM modelled in EVERY run that goes
+# into the group analysis (every participant x session x task found in STEP 0).
+# For each run, a voxel counts as modelled when both its rating_slope and its
+# mean_response beta are non-zero (step(abs(a)) = 1 for any non-zero value):
+# first_level_afni.sh sets every voxel outside its analysis mask (fMRIPrep
+# brain mask AND data at every time point) to exactly 0. Each run's mask is
+# resampled to the reference grid with nearest-neighbour interpolation
+# (3dresample -rmode NN, which keeps it 0/1), then 3dmask_tool -frac 1.0 keeps
+# only voxels present in 100% of the run masks.
+#
+# WHY per run and not per participant: STEP 1 AVERAGES sessions, so a voxel
+# with data in only one session would come out non-zero (half its beta) in the
+# average. Requiring every run keeps such voxels out.
+# WHY not fMRIPrep's masks (used until 2026-10-24): voxels inside fMRIPrep's mask
+# can still have no data (tedana coverage, extents mask). Those would sit inside
+# the group mask as zeros, which 3dMEMA can skip (-missing_data 0) but 3dttest++
+# would treat as real values (Taylor et al. 2018, bioRxiv 10.1101/308643).
+# Reference grid: the first slope Coef map from STEP 1 (all maps share the
+# first-level grid).
+# 3dinfo -same_grid then prints 1 for each map that is on the same grid as the
+# mask (a check only; its result does not stop the script).
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 2: building group mask"
 echo "=============================================================="
@@ -287,43 +461,49 @@ echo "=============================================================="
 REF=$(ls -1 "${INPUTS}"/*_task-*_slope_Coef.nii.gz 2>/dev/null | head -n1)
 if [ -z "${REF}" ]; then echo "ERROR: no extracted Coef maps for masking"; exit 1; fi
 
-submasks=()
+runmasks=()
 for SUB in "${SUBJECTS[@]}"; do
-    bm=$(ls -1 "${FMRIPREP_OUT}/${SUB}"/ses-*/func/${SUB}_ses-*_task-*_space-MNI152NLin2009cAsym*desc-brain_mask.nii.gz 2>/dev/null | head -n1)
-    [ -z "${bm}" ] && continue
-    rm_out=${MASKDIR}/${SUB}_brainmask_rs.nii.gz
-    rm -f "${rm_out}"
-    ${AFNI} "3dresample -master ${REF} -rmode NN -prefix ${rm_out} -input ${bm}"
-    submasks+=("${rm_out}")
+    for TASK in "${TASKS[@]}"; do
+        for SES in ${SESS[${SUB} ${TASK}]}; do
+            D=$(stats_dset "${SUB}" "${SES}" "${TASK}")
+            rmask=${MASKDIR}/${SUB}_${SES}_task-${TASK}_modelled.nii.gz
+            rm -f "${rmask}" "${rmask%.nii.gz}_native.nii.gz"
+            ${AFNI} "3dcalc -a ${D}'[${SLOPE_COEF}]' -b ${D}'[${MEAN_COEF}]' \
+                         -expr 'step(abs(a))*step(abs(b))' -datum byte \
+                         -prefix ${rmask%.nii.gz}_native.nii.gz
+                     3dresample -master ${REF} -rmode NN -prefix ${rmask} -input ${rmask%.nii.gz}_native.nii.gz"
+            rm -f "${rmask%.nii.gz}_native.nii.gz"
+            [ -f "${rmask}" ] && runmasks+=("${rmask}")
+        done
+    done
 done
+if [ "${#runmasks[@]}" -eq 0 ]; then echo "ERROR: no run masks could be built for the group mask"; exit 1; fi
 
 rm -f "${GROUPMASK}"
-if [ "${#submasks[@]}" -ge 1 ]; then
-    echo "  intersecting ${#submasks[@]} fMRIPrep brain masks"
-    ${AFNI} "3dmask_tool -input ${submasks[*]} -frac 1.0 -prefix ${GROUPMASK}"
-else
-    echo "  WARNING: no fMRIPrep brain masks found -> falling back to Coef coverage"
-    ${AFNI} "3dmask_tool -input ${INPUTS}/*_slope_Coef.nii.gz -frac 1.0 -prefix ${GROUPMASK}"
-fi
+echo "  intersecting ${#runmasks[@]} run masks (non-zero betas in every run)"
+${AFNI} "3dmask_tool -input ${runmasks[*]} -frac 1.0 -prefix ${GROUPMASK}"
+echo "  group mask: $(${AFNI} "3dBrickStat -count -non-zero ${GROUPMASK}" 2>/dev/null | tail -n1 | awk '{print $1}') voxels"
 ${AFNI} "3drefit -space MNI ${GROUPMASK}"
 
 echo "  grid consistency check (want 1s):"
 ${AFNI} "3dinfo -same_grid ${GROUPMASK} ${INPUTS}/*_slope_Coef.nii.gz" || true
 
-# Helper: subjects that have an extracted map for a given task/effect.
-subs_with() {  # <task> <effect>
-    local task="$1" eff="$2" s
-    for s in "${SUBJECTS[@]}"; do
-        # Require sessions discovered in STEP 0 too, so a stale input file left by
-        # an earlier run of a since-excluded run is never pooled.
-        [ -n "${SESS[${s} ${task}]}" ] || continue
-        [ -f "${INPUTS}/${s}_task-${task}_${eff}_Coef.nii.gz" ] && echo "${s}"
-    done
-}
-
-# ==============================================================================
-# STEP 3 — 3dMEMA one-sample per task (slope primary, mean sanity)
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# STEP 3. 3dMEMA one-sample test, per task (slope = primary, mean = sanity).
+#
+# 3dMEMA ("Mixed Effects Meta Analysis") tests whether the group effect is
+# different from zero. Unlike a plain t-test it is given each participant's
+# beta AND t-statistic, so it knows how precise each participant's estimate is
+# and lets less precise participants count less.
+#   -set NAME  sub beta t  sub beta t ...   one entry per participant
+#   -mask                                   only test voxels in the group mask
+#   -missing_data 0                         a value of 0 at a voxel means
+#                                           "no data for this participant here"
+# All other 3dMEMA options are at their defaults (in AFNI 26.1.02's 3dMEMA.R,
+# that includes the Hartung-Knapp adjustment of the output t-statistic).
+# Output sub-brick [0] = group effect, [1] = its t-statistic.
+# Skipped when fewer than 2 participants have the map.
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 3: 3dMEMA one-sample per task"
 echo "=============================================================="
@@ -350,11 +530,19 @@ for TASK in "${TASKS[@]}"; do
     done
 done
 
-# ==============================================================================
-# STEP 4 — 3dMEMA between-task slope contrasts
-# Per subject (having both tasks): bDelta = bX - bY ;
-#   seDelta = sqrt(seX^2 + seY^2) ; tDelta = bDelta/seDelta ; then 1-sample MEMA.
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# STEP 4. 3dMEMA between-task contrasts of the rating slope (X minus Y).
+#
+# For each participant who has a slope map for BOTH tasks:
+#   bDelta = bX - bY                        difference of the slopes
+#   SE^2   = (b / t)^2 for each task        (as in STEP 1)
+#   tDelta = bDelta / sqrt(SE_X^2 + SE_Y^2) its t-statistic
+#   (where a task's t = 0, its SE^2 term is replaced by 1)
+# The difference maps then go into a one-sample 3dMEMA, as in STEP 3.
+# Participants here are chosen by whether their two slope files exist in
+# inputs/ (not through subs_with).
+# Output: inputs/contrast_X_vs_Y/<sub>_bDelta / _tDelta, mema/mema_X_vs_Y_slope.
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 4: 3dMEMA between-task slope contrasts"
 echo "=============================================================="
@@ -373,7 +561,9 @@ for pair in "${BETWEEN_TASK_PAIRS[@]}"; do
         bD=${cdir}/${SUB}_bDelta.nii.gz
         tD=${cdir}/${SUB}_tDelta.nii.gz
         rm -f "${bD}" "${tD}"
-        # seX^2=(cX/tX)^2, seY^2=(cY/tY)^2 (guard t==0); tDelta=(cX-cY)/sqrt(seX2+seY2)
+        # a = bX, b = tX, c = bY, d = tY.
+        # (a/(b+equals(b,0)))^2*step(abs(b)) = seX^2 where tX != 0, else 0;
+        # "+ equals(b,0) + equals(d,0)" adds 1 for each task whose t is 0.
         ${AFNI} "3dcalc \
             -a ${cX} -b ${tX} -c ${cY} -d ${tY} \
             -expr '(a-c)' -prefix ${bD}"
@@ -395,14 +585,28 @@ for pair in "${BETWEEN_TASK_PAIRS[@]}"; do
         -set ${X}_minus_${Y} ${setarg}"
 done
 
-# ==============================================================================
-# STEP 5 — 3dttest++ (one-sample per task; paired between-task) with -Clustsim
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# STEP 5. 3dttest++ versions of STEPs 3 and 4.
+#
+# 3dttest++ is an ordinary t-test on the betas only (it ignores each
+# participant's precision). It is run as a cross-check of the 3dMEMA results.
+#   (a) one-sample t-test per task and effect (-setA = one map per participant)
+#   (b) paired t-test of the slope between tasks (-paired, -setA = task X,
+#       -setB = task Y, same participants in the same order)
+# -Clustsim NTHR: after the t-test, 3dttest++ builds its own cluster-size
+#   tables by randomly sign-flipping the residuals (about 10000 times). The
+#   AFNI help says this needs at least 14 datasets in total (setA + setB), so it
+#   is only added when n >= 14 (one-sample) or 2n >= 14 (paired). With
+#   -Clustsim on, the output statistics are z-scores instead of t-values.
+#   Without it, use the STEP 6 table instead.
+# The command first moves into ttest/ and uses a relative -prefix (the original
+# author found -Clustsim needs a relative prefix).
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 5: 3dttest++ (with -Clustsim)"
 echo "=============================================================="
 
-# One-sample per task
+# (a) One-sample per task
 for TASK in "${TASKS[@]}"; do
     for eff in slope mean; do
         setarg=""; n=0
@@ -427,7 +631,8 @@ for TASK in "${TASKS[@]}"; do
     done
 done
 
-# Paired between-task (slope), subjects with BOTH tasks, matched order
+# (b) Paired between-task (slope): participants with BOTH tasks, same order in
+#     setA and setB. As in STEP 4, chosen by whether the two files exist.
 for pair in "${BETWEEN_TASK_PAIRS[@]}"; do
     X=${pair%%:*}; Y=${pair##*:}
     setA=""; setB=""; n=0
@@ -455,13 +660,29 @@ for pair in "${BETWEEN_TASK_PAIRS[@]}"; do
         -setB ${Y} ${setB} ${CS}"
 done
 
-# ==============================================================================
-# STEP 6 — Residual-based cluster correction (3dFWHMx -> 3dClustSim)
-# 3dMEMA has no built-in ClustSim, and 3dttest++ -Clustsim needs >=14 samples,
-# so this table is the general-purpose corrector: it depends only on the mask,
-# the noise smoothness, and CLUST_PTHR -- NOT on subject count -- so it applies
-# to BOTH the MEMA maps and the (small-n) 3dttest++ maps. Apply via 3dClusterize.
-# ==============================================================================
+# ------------------------------------------------------------------------------
+# STEP 6. Cluster-size table for the group maps (3dFWHMx -> 3dClustSim).
+#
+# 3dMEMA has no built-in cluster simulation, and 3dttest++ -Clustsim needs at
+# least 14 datasets, so this table is the general-purpose correction. It
+# depends only on the mask, the smoothness of the noise and CLUST_PTHR, not on
+# the number of participants, so it can be used for the 3dMEMA maps and for
+# small-n 3dttest++ maps.
+#   (a) 3dFWHMx -acf: for every first-level REML residual time series
+#       (<PREFIX>_errts_REML+tlrc) that is not excluded, estimate how the noise
+#       is correlated across space, inside the group mask. The fit is
+#       ACF(r) = a*exp(-r^2/(2*b^2)) + (1-a)*exp(-r/c); the last line of the
+#       output holds a, b, c (and an effective FWHM). One line per run goes into
+#       clustsim/acf_params.txt. (acf_est.1D, the empirical curve, is
+#       overwritten by each run.)
+#   (b) a, b, c are averaged over runs.
+#   (c) 3dClustSim simulates noise with that smoothness inside the group mask
+#       and reports the minimum cluster size (in voxels) that occurs by chance
+#       with probability alpha = 0.05 (-athr) at voxelwise p = CLUST_PTHR
+#       (-pthr). Output: clustsim/mema_clustsim.NN{1,2,3}_{1sided,2sided,
+#       bisided}.1D (NN = which neighbouring voxels count as touching).
+# Apply a table with 3dClusterize (an example command is printed below).
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 6: 3dFWHMx -> 3dClustSim for MEMA cluster thresholds"
 echo "=============================================================="
@@ -493,20 +714,20 @@ else
     echo "  WARNING: no residual datasets found; skipped 3dClustSim for MEMA."
 fi
 
-# ==============================================================================
-# STEP 7 — Retention is NOT done here any more (2026-08-21)
+# ------------------------------------------------------------------------------
+# STEP 7. Copying to archive is NOT done here (changed 2026-08-21).
 #
-# This step used to `cp -a` the group maps into ${GROUP_FINAL} on archive. Two
-# problems with doing that from inside this job:
+# This step used to copy (cp -a) the group maps into GROUP_FINAL on archive.
+# Two problems with doing that from inside this job:
 #   1. It is archive I/O from a batch job. BYU RC: "Archive storage should
 #      generally NOT be used directly from batch jobs", and archive is migrating
 #      to a much slower backing store.
 #   2. It wrote an untarred tree onto a tier with a 1 M inode cap, every single
 #      run, silently accumulating near-duplicate copies.
-#
 # promote_to_archive.sh already does this correctly: from a login node, filtered
 # to the products worth keeping, and tarred. Run it when you park the project.
-# ==============================================================================
+# This step now only prints that reminder.
+# ------------------------------------------------------------------------------
 echo "=============================================================="
 echo "STEP 7: skipped — retention now belongs to promote_to_archive.sh"
 echo "=============================================================="

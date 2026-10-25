@@ -2,6 +2,14 @@
 # ============================================================================
 # Central path config for the Spirituality (Nielsen lab) multi-echo fMRI pipeline.
 #
+# *** As of 2026-10-24 most scripts NO LONGER read this file. ***
+# dcm2niix.sh, first_level_afni.sh, first_level_IM_afni.sh, second_level_afni.sh,
+# trr_export_afni.sh, reproducibility_afni.sh and check_trial_censoring.sh carry
+# their own settings (marked "# [shared]"); check_settings.sh confirms they agree.
+# Still sourced by: fmriprep_tedana.sh, tedana_only.sh, promote_to_archive.sh
+# (and the obsolete setup_rlib.sh). If you change a path here, change the matching
+# [shared] line in the self-contained scripts too, then run check_settings.sh.
+#
 # Source this at the top of every script in this directory:
 #     source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
 #
@@ -82,11 +90,18 @@ export LOGS=${PROJ_HOME}/logs
 export FMRIPREP_SIF=${HOME_ROOT}/software/fmriprep-25.1.4.sif
 export TEMPLATEFLOW_HOME=${HOME_ROOT}/software/templateflow
 export FS_LICENSE=${HOME_ROOT}/.freesurfer_license.txt
-export AFNI_SIF=/apps/afni/afni_make_build_latest.sif
+# AFNI 26.3.04 image built by ORC (installed 2026-10-24). It has R >= 4.4 with
+# every R package the pipeline needs (3dMEMA, 3dICC, 3dLMEr, TRR, irr) INSIDE the
+# image, and sets R_LIBS_USER=NULL so personal R libraries cannot override them.
+# Request spec: container_request.md. The old image
+# (/apps/afni/afni_make_build_latest.sif: Ubuntu 18.04, R 3.4.4, AFNI 24.3.01)
+# could not run AFNI's R programs. Don't mix the two within one analysis: the
+# AFNI version changes first- and second-level numbers slightly.
+export AFNI_SIF=/apps/afni/26.3.04.sif
 export CONDA_ENV=tedenv
-# R library for 3dICC / spatial ICC (irr, lme4, blme, metafor, snow).
-# On HOME, not scratch: compute nodes have NO internet, so a purged Rlib cannot be
-# rebuilt from inside a job — the install has to be redone from a login node.
+# LEGACY: personal R library that propped up the old image's R 3.4.4. Nothing in
+# the pipeline uses it any more (the new image carries its own packages). Kept
+# only so setup_rlib.sh still resolves; safe to delete ~/software/Rlib.
 export RLIB=${HOME_ROOT}/software/Rlib
 
 # ---- Apptainer binds ----
