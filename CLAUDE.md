@@ -117,8 +117,9 @@ copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.s
   its comment claimed "FD > 0.3mm". Outputs made before 2026-10-24 used the old rule.
 - **All-zero regressors crash 3dREMLfit** ("Cannot continue with all zero column"), and with
   `set -e` that ends the job for every remaining run. Guarded since 2026-10-24:
-  first_level_IM_afni.sh drops trials with no data left after censoring (signal_kept = censored
-  / uncensored sum of squares, from -x1D vs -x1D_uncensored; MIN_SIGNAL_KEPT=0) and renumbers
+  first_level_IM_afni.sh drops trials with signal_kept <= MIN_SIGNAL_KEPT (= 0.3 since 2026-10-24;
+  signal_kept = censored / uncensored sum of squares, from -x1D vs -x1D_uncensored; the unrated
+  regressor is dropped only at 0) and renumbers
   `_IM_trials.tsv` so row k = sub-brick k (orig_trial keeps the original number);
   first_level_afni.sh does a -nodata design check, drops a fully censored unrated regressor and
   skips a run whose rating[0]/rating[1] column is empty. AFNI design-matrix paths must stay

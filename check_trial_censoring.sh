@@ -83,7 +83,7 @@
 #                    first_level_IM_afni.sh STEP 2.
 #   signal_kept    : sum of squares of the trial's regressor over uncensored
 #                    volumes / over all volumes
-#   Dropped        : signal_kept not above MIN_SIGNAL_KEPT (0), or onset after
+#   Dropped        : signal_kept not above MIN_SIGNAL_KEPT (0.3), or onset after
 #                    the end of the run -- the same rule as
 #                    first_level_IM_afni.sh STEP 3
 # ==============================================================================
@@ -126,9 +126,9 @@ APPTAINER_MODULE=apptainer/1.3.6-qycanb2                                        
 
 # --- 1c. Analysis parameters --------------------------------------------------
 # The drop rule of first_level_IM_afni.sh: a trial is dropped unless its
-# signal_kept is ABOVE this value (0 = drop only trials with nothing left).
+# signal_kept is ABOVE this value (0.3 since 2026-10-24).
 # Must match first_level_IM_afni.sh, so that "im_model" is what it will do.
-MIN_SIGNAL_KEPT=0                                                                      # [shared]
+MIN_SIGNAL_KEPT=0.3                                                                    # [shared]
 
 # Mark a trial "LOW" when its signal_kept is below this. For looking only; it
 # does not change what first_level_IM_afni.sh does. Can be changed for one run
@@ -341,7 +341,7 @@ for PDIR in "${PARTICIPANT_DIRS[@]}"; do
                     # the end of the run (in_run = no); the real model leaves
                     # that trial out. Both count as "after the end of the run".
                     if (!(k in kept) || inrun[k] == "no") { v = ""; im = "dropped: onset is after the end of the run" }
-                    else { v = kept[k]; im = (v + 0 > min ? "kept" : "dropped: response fully censored") }
+                    else { v = kept[k]; im = (v + 0 > min ? "kept" : (v + 0 > 0 ? "dropped: signal_kept not above " min : "dropped: response fully censored")) }
                     flag = (im == "kept" && v + 0 < low ? "LOW" : "")
                     if (im != "kept") ndrop++
                     if (flag == "LOW") nlow++

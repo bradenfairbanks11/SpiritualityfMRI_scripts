@@ -51,7 +51,8 @@
 #   1. Split the rating timing file into an onset-only timing file and a
 #      per-trial table (trial number, onset, rating, low/high)
 #   2. Build the design matrix with one regressor per trial (3dDeconvolve)
-#   3. Drop trials with no data left after motion censoring (their regressor
+#   3. Drop trials that lost too much data to motion censoring (signal_kept
+#      at or below MIN_SIGNAL_KEPT = 0.3; a fully censored trial's regressor
 #      would be all zeros, which 3dREMLfit cannot fit)
 #   4. Rebuild the design matrix without them, if any were dropped
 #   5. Fit it with autocorrelation-corrected least squares (3dREMLfit) and keep
@@ -122,9 +123,11 @@
 #   Estimation     : 3dREMLfit (ARMA(1,1) noise model, voxelwise)
 #   Rating split   : high = rating >= 3, low = rating 1-2 (for 3dLMEr -TRR,
 #                    which needs exactly 2 conditions)
-#   Dropped trials : a trial whose whole modelled response falls on censored
-#                    volumes (or whose onset is after the end of the run) gets
-#                    no beta and is left out of the model
+#   Dropped trials : a trial with 30% or less of its modelled response left
+#                    after censoring (signal_kept <= 0.3; signal_kept = sum of
+#                    squares of the trial's regressor over uncensored volumes /
+#                    over all volumes), or whose onset is after the end of the
+#                    run, gets no beta and is left out of the model
 #   Runs with fewer than 2 (kept) rated trials are skipped.
 # ==============================================================================
 
@@ -168,15 +171,16 @@ TR=1.388              # [shared] seconds between volumes
 # a trial is "high" if its 1-4 rating is >= HIGH_MIN, otherwise "low".
 HIGH_MIN=3
 
-# Trials with no data left after motion censoring (STEP 3). signal_kept = the
-# fraction of a trial's modelled response that falls on volumes that survive
-# censoring (1 = untouched, 0 = all censored). A trial is dropped unless its
-# signal_kept is ABOVE this value. 0 = drop only trials with nothing left, which
-# is the minimum needed for 3dREMLfit to run. (Values are rounded to 6 decimals,
-# so a trial with less than 0.0000005 of its response left also counts as 0.)
-# check_trial_censoring.sh and <PREFIX>_IM_trial_censoring.tsv show how much of
-# each trial was censored, if you want a stricter cut-off.
-MIN_SIGNAL_KEPT=0                                                                      # [shared]
+# Trials that lost too much data to motion censoring (STEP 3). signal_kept =
+# the fraction of a trial's modelled response that falls on volumes that
+# survive censoring (1 = untouched, 0 = all censored). A trial is dropped
+# unless its signal_kept is ABOVE this value. 0.3 (set 2026-10-24): a trial
+# with 30% or less of its response left has a beta resting on a few volumes.
+# (0 would drop only fully censored trials, the minimum 3dREMLfit needs.)
+# check_trial_censoring.sh and <PREFIX>_IM_trial_censoring.tsv show each
+# trial's signal_kept. The unrated nuisance regressor is dropped only when it
+# is fully censored, whatever this value is.
+MIN_SIGNAL_KEPT=0.3                                                                    # [shared]
 
 # Tasks, by their BIDS labels.
 TASKS=(scripture FHS architecture)                                                     # [shared]
@@ -432,10 +436,12 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             "
 
             # ------------------------------------------------------------------
-            # STEP 3. Drop trials that have no data left after censoring.
+            # STEP 3. Drop trials that lost too much data to censoring.
             #
-            # WHY: a trial whose whole modelled response falls on censored
-            # volumes gets a regressor that is all zeros. Its beta cannot be estimated, and 3dREMLfit stops with
+            # WHY: a trial with little of its modelled response left has a
+            # beta that rests on a few volumes. And a trial whose whole
+            # response falls on censored volumes gets a regressor that is all
+            # zeros: its beta cannot be estimated, and 3dREMLfit stops with
             # "Cannot continue with all zero column". With 'set -e' that would
             # end the job for every remaining participant.
             #
@@ -444,10 +450,10 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             # squares over all volumes), i.e. the fraction of that trial's
             # modelled response that is still in the data (1 = untouched,
             # 0 = nothing left). A trial is DROPPED when signal_kept is not
-            # above MIN_SIGNAL_KEPT (see SECTION 1c; 0 = drop only trials with
-            # nothing left). Dropped trials are left out of the model entirely:
+            # above MIN_SIGNAL_KEPT (see SECTION 1c; 0.3). Dropped trials are left out of the model entirely:
             # their response volumes are already gone, so there is nothing to
-            # model. The unrated regressor is dropped by the same rule.
+            # model. The unrated regressor (a nuisance regressor) is dropped
+            # only when it is fully censored (signal_kept 0).
             # A trial whose onset is after the end of the run (e.g. a timing
             # file that does not match the run) has no column at all, because
             # AFNI ignores such onsets; it is listed as dropped for that reason.
@@ -487,7 +493,7 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
                     } else if (inrun[k] == "no") {
                         status = "dropped: onset is after the end of the run"
                     } else {
-                        status = "dropped: response fully censored"
+                        status = (kept[k] + 0 > 0 ? "dropped: signal_kept not above " min : "dropped: response fully censored")
                     }
                     print $0 "\t" kept[k] "\t" status
                 }
@@ -497,13 +503,13 @@ for PARTICIPANT_DIR in "${PARTICIPANT_DIRS[@]}"; do
             NTRIAL=$(($(wc -l < "${TRIALS}") - 1))
             NDROP=$((NALL - NTRIAL))
             if [ "${NDROP}" -gt 0 ]; then
-                echo "  WARNING: ${NDROP} of ${NALL} trial(s) dropped (no data left after censoring):"
+                echo "  WARNING: ${NDROP} of ${NALL} trial(s) dropped (too little data left after censoring):"
                 awk -F'\t' 'NR > 1 && $6 != "kept" { printf "    trial %s (onset %s s): %s\n", $1, $2, $6 }' "${CENSCHECK}"
             fi
             CHANGED=${NDROP}
             if [ "${USE_UNRATED}" = 1 ]; then
                 UNRATED_KEPT=$(printf '%s\n' "${KEPT_TABLE}" | awk -F'\t' '$1 == "unrated#0" { print $2 }')
-                if ! awk -v v="${UNRATED_KEPT:-0}" -v min="${MIN_SIGNAL_KEPT}" 'BEGIN { exit !(v + 0 > min) }'; then
+                if ! awk -v v="${UNRATED_KEPT:-0}" 'BEGIN { exit !(v + 0 > 0) }'; then
                     echo "  WARNING: unrated regressor dropped (no data left after censoring)"
                     USE_UNRATED=0
                     CHANGED=1
