@@ -62,9 +62,10 @@ this project, or the derivatives — 10–12 h of fMRIPrep per subject — are d
   raw data on archive, containers and timing files on home. A single-root bind fails
   *silently* inside the container.
 - **Timing files cannot be regenerated on the cluster.** `generate_timing_files.py` runs on
-  Braden's local machine. New `*_ratingAM.1D` **and `*_unrated.1D`** files go straight to
-  `~/spirituality_fmri/timing/` (upload the whole folder; a missing `_unrated.1D` silently
-  puts that run's no-response trials back into the baseline).
+  Braden's local machine. New `*_ratingAM.1D`, `*_unrated.1D` **and `*_stimuli.tsv`** files go
+  straight to `~/spirituality_fmri/timing/` (upload the whole folder; a missing `_unrated.1D`
+  silently puts that run's no-response trials back into the baseline, and a missing
+  `_stimuli.tsv` makes trr_export_afni.sh skip the task).
   `first_level_afni.sh` silently skips runs with no timing file, so a missing one looks like
   a clean run that did nothing.
 - **Compute nodes have no internet.** Any pip/R install must be done from a login node.
@@ -104,6 +105,17 @@ Trial-level reliability branch (added 2026-10-20): `first_level_IM_afni.sh` (one
 trial via `-stim_times_IM`, reusing first_level_afni.sh's scaled data + motion files) →
 `trr_export_afni.sh` (per-trial NIfTIs, data tables, group-cluster ROIs into `${TRR_OUT}`) →
 copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.sh`.
+
+- **TRR conditions are stimulus labels (since 2026-10-24), not the rating split.**
+  `stimulus_conditions.tsv` (repo; copy to `~/spirituality_fmri/scripts/`) labels every stimulus
+  yield = high/low (high-yield list from a separate pre-study survey; source of record is the
+  RTF in Box `data/Inter-session_behavioral_ICC_results/high_yield_stimuli/`) and, for
+  architecture, faith = lds/other (file-name prefix). trr_export_afni.sh joins each trial to
+  its stimulus via `_IM_trials.tsv` orig_trial = row of `<timing>/byv-*_stimuli.tsv` (onsets
+  must match, else the task stops). local_r_steps.sh `TRR_VOX_RUNS` runs 3dLMEr -TRR for
+  scripture/FHS/architecture yield + architecture faith. Scanner check (2026-10-24): yield
+  separates in-scanner ratings strongly for scripture/FHS (~1.4-1.9 points, every subject) but
+  weakly for architecture (+0.25-0.6), where only the LDS images follow the survey.
 
 - **AFNI image: `/apps/afni/26.3.04.sif` (since 2026-10-24).** ORC built it to the spec in
   `container_request.md`: Ubuntu 24.04, R >= 4.4, every R package inside the image,

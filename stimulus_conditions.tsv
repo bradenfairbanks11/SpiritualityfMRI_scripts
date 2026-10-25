@@ -1,0 +1,175 @@
+# stimulus_conditions.tsv -- condition labels for every stimulus file, used by
+# trr_export_afni.sh to label each single trial for the two-condition TRR models.
+#
+# Columns:
+#   task      BIDS task label (scripture / FHS / architecture)
+#   stimulus  stimulus file name without .png, exactly as in the PsychoPy CSVs
+#   yield     high / low. high = on the "high yield" list: stimuli that survey
+#             responders, in a SEPARATE survey run before this study, more
+#             consistently rated higher on the spiritual scale. low = every
+#             other stimulus file of that task. Source of record:
+#             Box Spirituality_fMRI/data/Inter-session_behavioral_ICC_results/
+#             high_yield_stimuli/high_yield_stimuli.rtf (transcribed in
+#             high_yield_stimuli.R next to it). 7 listed stimuli were never shown
+#             in the scanner (FH3 FH17 FH18 FH34 LDS_A_I_1 Out_M_I_2 Out_M_I_7).
+#   faith     architecture only: lds (file name starts LDS_) or other (Out_).
+#             NA for scripture and FHS (no such split in their stimuli).
+#
+# Rows: every .png stimulus in the PsychoPy task folders (Phase_1_MRI and
+# Phase_2_MRI): S1-S50, FH1-FH40, and the 64 architecture images.
+# Lines starting with # are comments.
+task	stimulus	yield	faith
+scripture	S1	low	NA
+scripture	S2	low	NA
+scripture	S3	low	NA
+scripture	S4	low	NA
+scripture	S5	low	NA
+scripture	S6	low	NA
+scripture	S7	low	NA
+scripture	S8	low	NA
+scripture	S9	low	NA
+scripture	S10	low	NA
+scripture	S11	low	NA
+scripture	S12	low	NA
+scripture	S13	low	NA
+scripture	S14	low	NA
+scripture	S15	low	NA
+scripture	S16	low	NA
+scripture	S17	low	NA
+scripture	S18	low	NA
+scripture	S19	low	NA
+scripture	S20	low	NA
+scripture	S21	low	NA
+scripture	S22	high	NA
+scripture	S23	low	NA
+scripture	S24	high	NA
+scripture	S25	low	NA
+scripture	S26	low	NA
+scripture	S27	low	NA
+scripture	S28	high	NA
+scripture	S29	high	NA
+scripture	S30	high	NA
+scripture	S31	high	NA
+scripture	S32	high	NA
+scripture	S33	high	NA
+scripture	S34	high	NA
+scripture	S35	high	NA
+scripture	S36	high	NA
+scripture	S37	high	NA
+scripture	S38	high	NA
+scripture	S39	high	NA
+scripture	S40	high	NA
+scripture	S41	high	NA
+scripture	S42	high	NA
+scripture	S43	low	NA
+scripture	S44	high	NA
+scripture	S45	high	NA
+scripture	S46	high	NA
+scripture	S47	high	NA
+scripture	S48	high	NA
+scripture	S49	high	NA
+scripture	S50	high	NA
+FHS	FH1	high	NA
+FHS	FH2	high	NA
+FHS	FH3	high	NA
+FHS	FH4	low	NA
+FHS	FH5	high	NA
+FHS	FH6	high	NA
+FHS	FH7	high	NA
+FHS	FH8	high	NA
+FHS	FH9	high	NA
+FHS	FH10	high	NA
+FHS	FH11	high	NA
+FHS	FH12	low	NA
+FHS	FH13	low	NA
+FHS	FH14	high	NA
+FHS	FH15	high	NA
+FHS	FH16	high	NA
+FHS	FH17	high	NA
+FHS	FH18	high	NA
+FHS	FH19	low	NA
+FHS	FH20	low	NA
+FHS	FH21	low	NA
+FHS	FH22	low	NA
+FHS	FH23	low	NA
+FHS	FH24	low	NA
+FHS	FH25	low	NA
+FHS	FH26	low	NA
+FHS	FH27	low	NA
+FHS	FH28	low	NA
+FHS	FH29	low	NA
+FHS	FH30	low	NA
+FHS	FH31	low	NA
+FHS	FH32	low	NA
+FHS	FH33	low	NA
+FHS	FH34	high	NA
+FHS	FH35	low	NA
+FHS	FH36	low	NA
+FHS	FH37	high	NA
+FHS	FH38	high	NA
+FHS	FH39	low	NA
+FHS	FH40	low	NA
+architecture	LDS_A_E_1	high	lds
+architecture	LDS_A_E_2	high	lds
+architecture	LDS_A_E_3	high	lds
+architecture	LDS_A_E_4	low	lds
+architecture	LDS_A_E_5	high	lds
+architecture	LDS_A_E_6	high	lds
+architecture	LDS_A_E_7	high	lds
+architecture	LDS_A_E_8	high	lds
+architecture	LDS_A_I_1	high	lds
+architecture	LDS_A_I_2	high	lds
+architecture	LDS_A_I_3	high	lds
+architecture	LDS_A_I_4	high	lds
+architecture	LDS_A_I_5	high	lds
+architecture	LDS_A_I_6	high	lds
+architecture	LDS_A_I_7	high	lds
+architecture	LDS_A_I_8	low	lds
+architecture	LDS_M_E_1	low	lds
+architecture	LDS_M_E_2	low	lds
+architecture	LDS_M_E_3	low	lds
+architecture	LDS_M_E_4	low	lds
+architecture	LDS_M_E_5	low	lds
+architecture	LDS_M_E_6	low	lds
+architecture	LDS_M_E_7	low	lds
+architecture	LDS_M_E_8	high	lds
+architecture	LDS_M_I_1	high	lds
+architecture	LDS_M_I_2	high	lds
+architecture	LDS_M_I_3	low	lds
+architecture	LDS_M_I_4	low	lds
+architecture	LDS_M_I_5	low	lds
+architecture	LDS_M_I_6	low	lds
+architecture	LDS_M_I_7	low	lds
+architecture	LDS_M_I_8	low	lds
+architecture	Out_A_E_1	low	other
+architecture	Out_A_E_2	low	other
+architecture	Out_A_E_3	low	other
+architecture	Out_A_E_4	low	other
+architecture	Out_A_E_5	low	other
+architecture	Out_A_E_6	high	other
+architecture	Out_A_E_7	high	other
+architecture	Out_A_E_8	high	other
+architecture	Out_A_I_1	high	other
+architecture	Out_A_I_2	low	other
+architecture	Out_A_I_3	low	other
+architecture	Out_A_I_4	low	other
+architecture	Out_A_I_5	low	other
+architecture	Out_A_I_6	low	other
+architecture	Out_A_I_7	low	other
+architecture	Out_A_I_8	low	other
+architecture	Out_M_E_1	high	other
+architecture	Out_M_E_2	low	other
+architecture	Out_M_E_3	low	other
+architecture	Out_M_E_4	high	other
+architecture	Out_M_E_5	high	other
+architecture	Out_M_E_6	high	other
+architecture	Out_M_E_7	high	other
+architecture	Out_M_E_8	high	other
+architecture	Out_M_I_1	high	other
+architecture	Out_M_I_2	high	other
+architecture	Out_M_I_3	low	other
+architecture	Out_M_I_4	low	other
+architecture	Out_M_I_5	low	other
+architecture	Out_M_I_6	low	other
+architecture	Out_M_I_7	high	other
+architecture	Out_M_I_8	high	other

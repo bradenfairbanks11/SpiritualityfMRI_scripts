@@ -31,7 +31,10 @@
 #   uses the same data and the same nuisance model, but gives every rated trial
 #   its OWN regressor (AFNI's -stim_times_IM; IM = "individually modulated").
 #   The result is one beta map PER TRIAL. Each trial is also labelled "low"
-#   (rating 1-2) or "high" (rating 3-4).
+#   (rating 1-2) or "high" (rating 3-4). (The two-condition TRR models now use
+#   STIMULUS labels instead -- high/low yield, LDS/other-faith -- which
+#   trr_export_afni.sh adds from each trial's orig_trial number; the rating
+#   label is kept for reference.)
 #   These trial-level betas are the input to AFNI's trial-level test-retest
 #   reliability tools, 3dLMEr -TRR (whole brain) and TRR (region level):
 #     Chen et al. (2021) NeuroImage 245:118647, "Trial and error: A hierarchical
@@ -121,8 +124,8 @@
 #                    one before it are dropped when fMRIPrep's framewise
 #                    displacement is > 0.3 mm)
 #   Estimation     : 3dREMLfit (ARMA(1,1) noise model, voxelwise)
-#   Rating split   : high = rating >= 3, low = rating 1-2 (for 3dLMEr -TRR,
-#                    which needs exactly 2 conditions)
+#   Rating split   : high = rating >= 3, low = rating 1-2 (a reference label;
+#                    the TRR conditions come from the stimuli, see above)
 #   Dropped trials : a trial with 30% or less of its modelled response left
 #                    after censoring (signal_kept <= 0.3; signal_kept = sum of
 #                    squares of the trial's regressor over uncensored volumes /
@@ -167,7 +170,8 @@ APPTAINER_MODULE=apptainer/1.3.6-qycanb2                                        
 # the TR used to build the regressors is read from the input dataset's header.
 TR=1.388              # [shared] seconds between volumes
 
-# Rating split for the 2-condition 3dLMEr -TRR model (STEP 1):
+# Rating label written to the trial table (STEP 1; for reference -- the TRR
+# conditions are stimulus labels added by trr_export_afni.sh):
 # a trial is "high" if its 1-4 rating is >= HIGH_MIN, otherwise "low".
 HIGH_MIN=3
 

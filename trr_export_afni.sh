@@ -35,7 +35,8 @@
 #   sessions, and writes:
 #     - one 3D beta map per trial,
 #     - a table listing every trial (participant, session, trial, rating,
-#       low/high condition, file name),
+#       low/high rating, which stimulus it showed, that stimulus's yield
+#       (high/low) and, for architecture, faith (lds/other), file name),
 #     - a mask for the task (voxels with a non-zero beta for every trial),
 #     - regions of interest (ROIs) = the significant clusters of the group
 #       mean_response map from second_level_afni.sh,
@@ -55,7 +56,7 @@
 #   1. Find the participants with single-trial betas for BOTH sessions
 #      (skipping excluded runs).
 #   2. Split each run's trial-beta bucket into one file per trial, and write
-#      the trial table.
+#      the trial table (with each trial's stimulus and its condition labels).
 #   3. Check that every file listed in the trial table was written.
 #   4. Build the task's mask: voxels with a non-zero beta for every trial of
 #      every included run.
@@ -66,7 +67,13 @@
 #   trial betas  : <AFNI_OUT>/sub-NN/ses-N/task-T/single_trial/sub-NN_ses-N_task-T_IM_betas+tlrc
 #                    (sub-brick k = trial k, 0-based)
 #   trial table  : <AFNI_OUT>/sub-NN/ses-N/task-T/single_trial/sub-NN_ses-N_task-T_IM_trials.tsv
-#                    columns: trial (0-based), onset, rating, cond (low/high)
+#                    columns: trial (0-based), onset, rating, cond (low/high),
+#                    orig_trial (its number among ALL rated trials), signal_kept
+#   stimuli      : <TIMING_DIR>/byv-<BYV>_ses-N_task-T_stimuli.tsv  (written by
+#                    generate_timing_files.py next to the _ratingAM.1D file;
+#                    row k = rated trial k = orig_trial k)
+#   labels       : <STIM_CONDITIONS> = stimulus_conditions.tsv in this folder
+#                    (task, stimulus, yield high/low, faith lds/other/NA)
 #   group map    : <GROUP_OUT>/mema/mema_T_mean+tlrc     (second_level_afni.sh STEP 3)
 #   cluster table: <GROUP_OUT>/clustsim/mema_clustsim.NN1_bisided.1D  (STEP 6 there)
 #   exclusions   : <EXCLUSIONS_TSV> (+ <PARTICIPANTS_TSV> to map sub-NN -> BYV id)
@@ -75,13 +82,14 @@
 # be copied whole to another machine)
 #   inputs/<sub>_<ses>_task-<T>_trial-NNN.nii.gz   one 3D beta map per trial
 #                                                  (NNN = 0-based trial number)
-#   trials_task-<T>.tsv        Subj sess trial rating cond InputFile
-#                              -> the 3dLMEr -TRR data table (whole brain)
+#   trials_task-<T>.tsv        Subj sess trial rating cond stimulus yield faith InputFile
+#                              -> the source of the 3dLMEr -TRR data tables
+#                              (local_r_steps.sh picks the condition column)
 #   mask_task-<T>.nii.gz       voxels with a non-zero beta for every trial of
 #                              every included run
 #   rois_task-<T>.nii.gz       ROI map: cluster 1 = largest, 2 = next, ...
 #   rois_task-<T>_clusters.txt 3dClusterize report (size, peak xyz per ROI)
-#   roi_task-<T>.tsv           Subj sess trial rating cond ROI Y
+#   roi_task-<T>.tsv           Subj sess trial rating cond stimulus yield faith ROI Y
 #                              -> the region-level TRR data table
 #
 # HOW TO RUN
@@ -95,6 +103,10 @@
 #                  (percent signal change), one file per trial. Session labels
 #                  are written as ses1 / ses2. cond = low (rating 1-2) or high
 #                  (rating 3-4), as set in first_level_IM_afni.sh.
+#   Conditions   : from the stimulus each trial showed (stimulus_conditions.tsv):
+#                  yield = high / low (high = on the high-yield list from a
+#                  separate survey run before this study); faith = lds / other
+#                  (architecture only, from the image's file name).
 #   Mask         : per task, the voxels with a non-zero single-trial beta for
 #                  EVERY trial of EVERY included run (3dmask_tool -frac 1.0).
 #                  The betas are exactly 0 outside each run's first-level
@@ -135,6 +147,9 @@ GROUP_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_group 
 TRR_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_trr           # [shared] output
 PARTICIPANTS_TSV=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/rawdata/participants.tsv  # [shared]
 EXCLUSIONS_TSV=/home/bradenf4/spirituality_fmri/scripts/exclusions.tsv                 # [shared] runs to skip
+TIMING_DIR=/home/bradenf4/spirituality_fmri/timing                                     # [shared] timing files
+# Condition labels per stimulus (yield, faith). Lives next to this script.
+STIM_CONDITIONS=/home/bradenf4/spirituality_fmri/scripts/stimulus_conditions.tsv
 LOGS=/home/bradenf4/spirituality_fmri/logs                                             # [shared]
 
 # Files made by second_level_afni.sh:
@@ -198,6 +213,11 @@ is_excluded() {                                                                 
 # ==============================================================================
 
 mkdir -p "${LOGS}" "${TRR_OUT}/inputs"
+
+if [ ! -f "${STIM_CONDITIONS}" ]; then
+    echo "ERROR: ${STIM_CONDITIONS} not found (copy stimulus_conditions.tsv from the repo)" >&2
+    exit 1
+fi
 
 module load "${APPTAINER_MODULE}"
 
@@ -275,12 +295,19 @@ for TASK in "${TASKS[@]}"; do
     #   sess   ses1 / ses2 (no hyphen, so it is a valid R factor level)
     #   trial  trial number (column 1 of _IM_trials.tsv)
     #   rating the 1-4 rating (column 3)
-    #   cond   low / high   (column 4)
+    #   cond   low / high rating (column 4)
+    #   stimulus  the stimulus the trial showed: row orig_trial (column 5) of
+    #          the run's _stimuli.tsv. Its onset must equal the trial's onset,
+    #          else the run's labels are not trusted and the task stops.
+    #   yield  high / low, and  faith  lds / other / NA: that stimulus's row
+    #          of stimulus_conditions.tsv (a stimulus missing there stops the
+    #          task too)
     #   InputFile  inputs/<PREFIX>_trial-NNN.nii.gz (relative path)
     # The run's beta bucket is also added to the list for STEP 4.
     # --------------------------------------------------------------------------
     TABLE=${TRR_OUT}/trials_task-${TASK}.tsv
-    printf 'Subj\tsess\ttrial\trating\tcond\tInputFile\n' > "${TABLE}"
+    printf 'Subj\tsess\ttrial\trating\tcond\tstimulus\tyield\tfaith\tInputFile\n' > "${TABLE}"
+    LABEL_ERR=0
     BETAS=""
     for sid in "${SUBS[@]}"; do
         for SES in "${SES1}" "${SES2}"; do
@@ -295,12 +322,35 @@ for TASK in "${TASKS[@]}"; do
                 done
             "
             seslab=${SES//-/}   # ses-1 -> ses1 (a valid R factor level)
-            awk -F'\t' -v s="${sid}" -v ses="${seslab}" -v pre="${PREFIX}" '
-                NR>1 { printf "%s\t%s\t%d\t%s\t%s\tinputs/%s_trial-%03d.nii.gz\n", s, ses, $1, $3, $4, pre, $1 }
-            ' "${TRIALS}" >> "${TABLE}"
+            STIMULI=${TIMING_DIR}/byv-$(byv_for_sub "${sid}")_${SES}_task-${TASK}_stimuli.tsv
+            if [ ! -f "${STIMULI}" ]; then
+                echo "ERROR: ${STIMULI} not found (re-run generate_timing_files.py, upload timing/)" >&2
+                LABEL_ERR=1
+                continue
+            fi
+            # Files read in order: conditions table, run's stimuli, run's trials.
+            if ! awk -F'\t' -v s="${sid}" -v ses="${seslab}" -v pre="${PREFIX}" -v task="${TASK}" '
+                FILENAME == ARGV[1] { if (!/^#/ && $1 == task) { yl[$2] = $3; fa[$2] = $4 }; next }
+                FILENAME == ARGV[2] { if (FNR > 1) { st[$1] = $4; on[$1] = $2 }; next }
+                FNR == 1 { if ($5 != "orig_trial") { print "ERROR: no orig_trial column in " FILENAME " (re-run first_level_IM_afni.sh)" > "/dev/stderr"; bad = 1; exit 1 }; next }
+                {
+                    k = $5
+                    if (!(k in st) || on[k] != $2) { print "ERROR: trial " $1 " (orig " k ", onset " $2 ") does not match " ARGV[2] > "/dev/stderr"; bad = 1; exit 1 }
+                    if (!(st[k] in yl)) { print "ERROR: stimulus " st[k] " (task " task ") not in " ARGV[1] > "/dev/stderr"; bad = 1; exit 1 }
+                    printf "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\tinputs/%s_trial-%03d.nii.gz\n", s, ses, $1, $3, $4, st[k], yl[st[k]], fa[st[k]], pre, $1
+                }
+                END { exit bad }
+            ' "${STIM_CONDITIONS}" "${STIMULI}" "${TRIALS}" >> "${TABLE}"; then
+                LABEL_ERR=1
+            fi
             BETAS="${BETAS} ${ST}/${PREFIX}_IM_betas+tlrc"
         done
     done
+
+    if [ "${LABEL_ERR}" -ne 0 ]; then
+        echo "ERROR task-${TASK}: stimulus labels could not be added for every run (see above) -- skipping this task." >&2
+        continue
+    fi
 
     # --------------------------------------------------------------------------
     # STEP 3. Check that every file listed in the trial table was written.
@@ -309,7 +359,7 @@ for TASK in "${TASKS[@]}"; do
     # If any are missing, the rest of this task is skipped, because the tables
     # would no longer line up with the files.
     # --------------------------------------------------------------------------
-    nmiss=$(awk -F'\t' -v root="${TRR_OUT}" 'NR>1 { f=root "/" $6; if ((getline line < f) < 0) m++; close(f) } END { print m+0 }' "${TABLE}")
+    nmiss=$(awk -F'\t' -v root="${TRR_OUT}" 'NR>1 { f=root "/" $9; if ((getline line < f) < 0) m++; close(f) } END { print m+0 }' "${TABLE}")
     if [ "${nmiss}" -gt 0 ]; then
         echo "ERROR task-${TASK}: ${nmiss} trial file(s) listed in ${TABLE} were not written." >&2
         continue
@@ -385,13 +435,14 @@ for TASK in "${TASKS[@]}"; do
     # order), with one mean per ROI (ROI values 1..NROI). The trial files are
     # given in trial-table order, so line i belongs to table row i. If the line
     # count does not match the row count, no ROI table is written.
-    # Output: one row per trial x ROI, with the trial's table columns plus
+    # Output: one row per trial x ROI, with the trial's table columns (all but
+    # InputFile) plus
     #   ROI = ROI01, ROI02, ...   and   Y = that trial's mean beta in that ROI.
     # Each line is split explicitly with split(..., " ") (which ignores leading
     # blanks): changing FS between files is unreliable on BSD/macOS awk, where
     # the first record of the second file is still split with the old FS.
     # --------------------------------------------------------------------------
-    FILES=$(awk -F'\t' -v root="${TRR_OUT}" 'NR>1 { printf "%s/%s ", root, $6 }' "${TABLE}")
+    FILES=$(awk -F'\t' -v root="${TRR_OUT}" 'NR>1 { printf "%s/%s ", root, $9 }' "${TABLE}")
     ${AFNI} "3dROIstats -mask ${ROIS} -quiet ${FILES}" > "${TRR_OUT}/.roistats_${TASK}.txt" 2>/dev/null
     NLINES=$(wc -l < "${TRR_OUT}/.roistats_${TASK}.txt" | tr -d ' ')
     NROWS=$(($(wc -l < "${TABLE}") - 1))
@@ -399,8 +450,8 @@ for TASK in "${TASKS[@]}"; do
         echo "ERROR task-${TASK}: 3dROIstats gave ${NLINES} lines for ${NROWS} trials -- not writing ${ROITAB}" >&2
         continue
     fi
-    awk -F'\t' 'BEGIN { print "Subj\tsess\ttrial\trating\tcond\tROI\tY" }
-         NR==FNR { if (FNR>1) meta[FNR-1] = $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5; next }
+    awk -F'\t' 'BEGIN { print "Subj\tsess\ttrial\trating\tcond\tstimulus\tyield\tfaith\tROI\tY" }
+         NR==FNR { if (FNR>1) meta[FNR-1] = $1 "\t" $2 "\t" $3 "\t" $4 "\t" $5 "\t" $6 "\t" $7 "\t" $8; next }
          { nv = split($0, v, " "); for (r = 1; r <= nv; r++) printf "%s\tROI%02d\t%s\n", meta[FNR], r, v[r] }' \
         "${TABLE}" "${TRR_OUT}/.roistats_${TASK}.txt" > "${ROITAB}"
     rm -f "${TRR_OUT}/.roistats_${TASK}.txt"

@@ -12,9 +12,12 @@
 #            the cluster script would have used)
 #   trr_vox  3dLMEr -TRR whole-brain trial-level test-retest reliability
 #            (Chen et al. 2021, NeuroImage 245:118647). 3dLMEr -TRR requires
-#            exactly 2 conditions: trials are split by rating, low (1-2) vs
-#            high (3-4). Outputs TRR-ave (reliability of the overall response)
-#            and TRR-con (reliability of the high-minus-low difference).
+#            exactly 2 conditions, defined by the STIMULUS each trial showed
+#            (stimulus_conditions.tsv, labels added by trr_export_afni.sh):
+#              yield: high vs low yield stimuli -- every task
+#              faith: LDS vs other-faith images -- architecture only
+#            Outputs TRR-ave (reliability of the average of the two
+#            conditions) and TRR-con (reliability of the difference).
 #   trr_roi  TRR (region-level, Bayesian, brms) for a SINGLE condition per
 #            task: reliability of the overall response in each group ROI
 #   dice     within- vs between-subject Dice test (dice_within_vs_between.R)
@@ -45,9 +48,19 @@ JOBS=${JOBS:-$(( NCPU > 3 ? NCPU - 2 : 1 ))}
 
 ICC_TASKS=(scripture FHS architecture)
 ICC_CONTRASTS=(mean_response rating_slope)
-# FHS is left out of the voxelwise rating split: at most 12 trials per run and
-# 6 of its runs have < 3 high-rated trials (timing files, 2026-10-20).
-TRR_VOX_TASKS=(scripture architecture)
+# Voxelwise 3dLMEr -TRR models, as task:column. The column is a column of
+# trials_task-<T>.tsv; its first level below is coded +0.5, the second -0.5.
+#   yield: high vs low yield (every task; per run about 12/12 scripture,
+#          7/5 FHS, 14/16 architecture trials)
+#   faith: lds vs other (architecture only)
+TRR_VOX_RUNS=(scripture:yield FHS:yield architecture:yield architecture:faith)
+contrast_levels() {   # column -> "plus_level minus_level"
+    case "$1" in
+        yield) echo "high low" ;;
+        faith) echo "lds other" ;;
+        *)     echo "ERROR: unknown contrast column $1" >&2; return 1 ;;
+    esac
+}
 TRR_ROI_TASKS=(scripture FHS architecture)
 # A subject enters the voxelwise model only with >= MIN_PER_COND trials of
 # EACH condition in EACH session (the high-minus-low difference needs both).
@@ -144,53 +157,66 @@ if want icc; then
 fi
 
 # =============================================================================
-# trr_vox — 3dLMEr -TRR, whole brain, low vs high rated trials
+# trr_vox — 3dLMEr -TRR, whole brain, two stimulus conditions per model
 # =============================================================================
 if want trr_vox; then
     echo "=============================================================="
-    echo "3dLMEr -TRR (whole brain; cond = low (1-2) vs high (3-4) rating)"
+    echo "3dLMEr -TRR (whole brain; yield = high vs low, faith = LDS vs other)"
     echo "=============================================================="
     VOX_SUMMARY=${RESULTS}/trr_vox_summary.tsv
-    printf 'task\tn_subj\tn_trials\tmetric\tmask\tmedian\n' > "${VOX_SUMMARY}"
-    for TASK in "${TRR_VOX_TASKS[@]}"; do
+    printf 'task\tcontrast\tn_subj\tn_trials\tmetric\tmask\tmedian\n' > "${VOX_SUMMARY}"
+    for RUNSPEC in "${TRR_VOX_RUNS[@]}"; do
+        TASK=${RUNSPEC%%:*}; CON=${RUNSPEC#*:}
+        LEVELS=$(contrast_levels "${CON}") || continue
+        read -r PLUS MINUS <<< "${LEVELS}"
         TABLE=${TRR_DIR}/trials_task-${TASK}.tsv
         TMASK=${TRR_DIR}/mask_task-${TASK}.nii.gz
         if [ ! -f "${TABLE}" ] || [ ! -f "${TMASK}" ]; then
             echo "skip ${TASK}: no ${TABLE} / mask (run trr_export_afni.sh, copy afni_trr/)"
             continue
         fi
-        # 3dLMEr data table. cond is dummy-coded -0.5 (low) / +0.5 (high) and
-        # passed with -qVars, as in the 3dLMEr -TRR help example. Subjects
-        # missing a condition in a session are dropped and listed.
-        DTAB=${RESULTS}/lmer_trr_task-${TASK}.tbl
-        awk -F'\t' -v root="${TRR_DIR}" -v minc="${MIN_PER_COND}" -v drop="${RESULTS}/lmer_trr_task-${TASK}_dropped.txt" '
-            NR==FNR { if (FNR>1) cnt[$1 SUBSEP $2 SUBSEP $5]++; next }
-            FNR==1  { print "Subj sess cond InputFile"; next }
+        # 3dLMEr data table. cond is dummy-coded +0.5 (PLUS level) / -0.5
+        # (MINUS level) of column CON and passed with -qVars, as in the 3dLMEr
+        # -TRR help example. Columns are found by their header names. Subjects
+        # with fewer than MIN_PER_COND trials of either level in either session
+        # are dropped and listed.
+        DTAB=${RESULTS}/lmer_trr_task-${TASK}_con-${CON}.tbl
+        DROPPED=${RESULTS}/lmer_trr_task-${TASK}_con-${CON}_dropped.txt
+        rm -f "${DROPPED}"
+        awk -F'\t' -v root="${TRR_DIR}" -v minc="${MIN_PER_COND}" -v drop="${DROPPED}" \
+            -v col="${CON}" -v plus="${PLUS}" -v minus="${MINUS}" '
+            FNR==1  { for (i = 1; i <= NF; i++) h[$i] = i
+                      if (!(col in h) || !("InputFile" in h)) { print "ERROR: no " col " / InputFile column" > "/dev/stderr"; exit 1 }
+                      c = h[col]; f = h["InputFile"]
+                      if (NR != FNR) print "Subj sess cond InputFile"
+                      next }
+            NR==FNR { cnt[$1 SUBSEP $2 SUBSEP $c]++; next }
             {
-                ok = (cnt[$1,"ses1","low"] >= minc && cnt[$1,"ses1","high"] >= minc &&
-                      cnt[$1,"ses2","low"] >= minc && cnt[$1,"ses2","high"] >= minc)
+                ok = (cnt[$1,"ses1",plus] >= minc && cnt[$1,"ses1",minus] >= minc &&
+                      cnt[$1,"ses2",plus] >= minc && cnt[$1,"ses2",minus] >= minc)
                 if (!ok) { bad[$1] = 1; next }
-                printf "%s %s %s %s/%s\n", $1, $2, ($5=="high" ? "0.5" : "-0.5"), root, $6
+                if ($c != plus && $c != minus) next
+                printf "%s %s %s %s/%s\n", $1, $2, ($c == plus ? "0.5" : "-0.5"), root, $f
             }
             END { for (s in bad) print s > drop }
-        ' "${TABLE}" "${TABLE}" > "${DTAB}"
+        ' "${TABLE}" "${TABLE}" > "${DTAB}" || { echo "  WARN: could not build ${DTAB}" >&2; continue; }
         NSUB=$(awk 'NR>1 {print $1}' "${DTAB}" | sort -u | wc -l | tr -d ' ')
         NTR=$(($(wc -l < "${DTAB}") - 1))
-        if [ -s "${RESULTS}/lmer_trr_task-${TASK}_dropped.txt" ]; then
-            echo "  ${TASK}: dropped (< ${MIN_PER_COND} trials of a condition in a session): $(sort "${RESULTS}/lmer_trr_task-${TASK}_dropped.txt" | tr '\n' ' ')"
+        if [ -s "${DROPPED}" ]; then
+            echo "  ${TASK} ${CON}: dropped (< ${MIN_PER_COND} trials of a condition in a session): $(sort "${DROPPED}" | tr '\n' ' ')"
         fi
         if [ "${NSUB}" -lt 3 ]; then
-            echo "skip ${TASK}: only ${NSUB} subject(s) with both conditions in both sessions"
+            echo "skip ${TASK} ${CON}: only ${NSUB} subject(s) with both conditions in both sessions"
             continue
         fi
-        OUTP=${RESULTS}/LMEr_TRR_task-${TASK}
+        OUTP=${RESULTS}/LMEr_TRR_task-${TASK}_con-${CON}
         rm -f "${OUTP:?}"+*.HEAD "${OUTP:?}"+*.BRIK*
-        echo "  ${TASK}: n=${NSUB} subjects, ${NTR} trials, ${JOBS} jobs (expect hours)"
+        echo "  ${TASK} ${CON} (+0.5 = ${PLUS}, -0.5 = ${MINUS}): n=${NSUB} subjects, ${NTR} trials, ${JOBS} jobs (expect hours)"
         if ! 3dLMEr -prefix "${OUTP}" -TRR -jobs "${JOBS}" -mask "${TMASK}" \
                 -qVars cond \
                 -model '0+sess+cond:sess+(0+sess|Subj)+(0+cond:sess|Subj)' \
                 -dataTable @"${DTAB}" > "${OUTP}.log" 2>&1; then
-            echo "  WARN: 3dLMEr -TRR failed for ${TASK}; see ${OUTP}.log" >&2
+            echo "  WARN: 3dLMEr -TRR failed for ${TASK} ${CON}; see ${OUTP}.log" >&2
             continue
         fi
         # Medians of the two reliability maps in the whole mask and in the ROIs.
@@ -209,11 +235,11 @@ if want trr_vox; then
                 MT=${MS%%:*}; MF=${MS#*:}
                 [ -f "${MF}" ] || continue
                 MED=$(3dBrickStat -median -mask "${MF}" "${OUTP}+tlrc[${IX}]" 2>/dev/null | tail -n1 | awk '{print $NF}')
-                printf '%s\t%d\t%d\t%s\t%s\t%s\n' "${TASK}" "${NSUB}" "${NTR}" "${LAB}" "${MT}" "${MED:-NA}" >> "${VOX_SUMMARY}"
+                printf '%s\t%s\t%d\t%d\t%s\t%s\t%s\n' "${TASK}" "${CON}" "${NSUB}" "${NTR}" "${LAB}" "${MT}" "${MED:-NA}" >> "${VOX_SUMMARY}"
             done
             DEGEN=$(3dmaskdump -noijk -mask "${TMASK}" "${OUTP}+tlrc[${IX}]" 2>/dev/null \
                 | awk '{ n++; if ($1==0 || $1==1 || $1==-1) d++ } END { if (n) printf "%.3f", d/n }')
-            printf '%s\t%d\t%d\t%s\t%s\t%s\n' "${TASK}" "${NSUB}" "${NTR}" "${LAB}_frac_0_or_pm1" wholebrain "${DEGEN:-NA}" >> "${VOX_SUMMARY}"
+            printf '%s\t%s\t%d\t%d\t%s\t%s\t%s\n' "${TASK}" "${CON}" "${NSUB}" "${NTR}" "${LAB}_frac_0_or_pm1" wholebrain "${DEGEN:-NA}" >> "${VOX_SUMMARY}"
         done
         echo "  -> ${OUTP}+tlrc"
     done
@@ -235,9 +261,11 @@ if want trr_roi; then
             echo "skip ${TASK}: no ${RT} (no group ROI survived, or export not copied)"
             continue
         fi
-        for ROI in $(awk -F'\t' 'NR>1 {print $6}' "${RT}" | sort -u); do
+        # Columns found by header name (ROI, Y), so new columns cannot shift them.
+        for ROI in $(awk -F'\t' 'NR==1 { for (i = 1; i <= NF; i++) if ($i == "ROI") c = i; next } { print $c }' "${RT}" | sort -u); do
             TAB=${RESULTS}/trr_task-${TASK}_${ROI}.tbl
-            awk -F'\t' -v r="${ROI}" 'NR==1 { print "Subj sess Y"; next } $6==r && $7!="" { print $1, $2, $7 }' "${RT}" > "${TAB}"
+            awk -F'\t' -v r="${ROI}" 'NR==1 { for (i = 1; i <= NF; i++) h[$i] = i; print "Subj sess Y"; next }
+                 $h["ROI"]==r && $h["Y"]!="" { print $h["Subj"], $h["sess"], $h["Y"] }' "${RT}" > "${TAB}"
             NSUB=$(awk 'NR>1 {print $1}' "${TAB}" | sort -u | wc -l | tr -d ' ')
             NTR=$(($(wc -l < "${TAB}") - 1))
             OUTP=${RESULTS}/TRR_task-${TASK}_${ROI}
