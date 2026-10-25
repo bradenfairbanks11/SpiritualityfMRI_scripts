@@ -36,7 +36,7 @@
 #     - one 3D beta map per trial,
 #     - a table listing every trial (participant, session, trial, rating,
 #       low/high condition, file name),
-#     - a brain mask for the task,
+#     - a mask for the task (voxels with a non-zero beta for every trial),
 #     - regions of interest (ROIs) = the significant clusters of the group
 #       mean_response map from second_level_afni.sh,
 #     - a table of each trial's mean beta in each ROI.
@@ -57,7 +57,8 @@
 #   2. Split each run's trial-beta bucket into one file per trial, and write
 #      the trial table.
 #   3. Check that every file listed in the trial table was written.
-#   4. Build the task's analysis mask (intersection of the runs' brain masks).
+#   4. Build the task's mask: voxels with a non-zero beta for every trial of
+#      every included run.
 #   5. Make ROIs from the group mean_response map (cluster-corrected).
 #   6. Average each trial's beta within each ROI and write the ROI table.
 #
@@ -66,8 +67,6 @@
 #                    (sub-brick k = trial k, 0-based)
 #   trial table  : <AFNI_OUT>/sub-NN/ses-N/task-T/single_trial/sub-NN_ses-N_task-T_IM_trials.tsv
 #                    columns: trial (0-based), onset, rating, cond (low/high)
-#   brain masks  : <FMRIPREP_OUT>/sub-NN/ses-N/func/
-#                    sub-NN_ses-N_task-T_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz
 #   group map    : <GROUP_OUT>/mema/mema_T_mean+tlrc     (second_level_afni.sh STEP 3)
 #   cluster table: <GROUP_OUT>/clustsim/mema_clustsim.NN1_bisided.1D  (STEP 6 there)
 #   exclusions   : <EXCLUSIONS_TSV> (+ <PARTICIPANTS_TSV> to map sub-NN -> BYV id)
@@ -78,7 +77,8 @@
 #                                                  (NNN = 0-based trial number)
 #   trials_task-<T>.tsv        Subj sess trial rating cond InputFile
 #                              -> the 3dLMEr -TRR data table (whole brain)
-#   mask_task-<T>.nii.gz       intersection of every included run's fMRIPrep mask
+#   mask_task-<T>.nii.gz       voxels with a non-zero beta for every trial of
+#                              every included run
 #   rois_task-<T>.nii.gz       ROI map: cluster 1 = largest, 2 = next, ...
 #   rois_task-<T>_clusters.txt 3dClusterize report (size, peak xyz per ROI)
 #   roi_task-<T>.tsv           Subj sess trial rating cond ROI Y
@@ -95,8 +95,11 @@
 #                  (percent signal change), one file per trial. Session labels
 #                  are written as ses1 / ses2. cond = low (rating 1-2) or high
 #                  (rating 3-4), as set in first_level_IM_afni.sh.
-#   Mask         : per task, the voxels inside the fMRIPrep MNI152NLin2009cAsym
-#                  brain mask of EVERY included run (3dmask_tool -frac 1.0).
+#   Mask         : per task, the voxels with a non-zero single-trial beta for
+#                  EVERY trial of EVERY included run (3dmask_tool -frac 1.0).
+#                  The betas are exactly 0 outside each run's first-level
+#                  analysis mask (fMRIPrep brain mask AND data at every time
+#                  point), so this = voxels modelled in every run.
 #   ROIs         : clusters of the group 3dMEMA mean_response map for that task
 #                  (NOT the rating slope, and NOT session-1-vs-2 agreement, so
 #                  ROIs are not chosen using the reliability being measured).
@@ -128,7 +131,6 @@ set -o pipefail    # a pipeline fails if ANY command in it fails
 #                                      weeks unused: everything this job reads/writes
 #   /nobackup/archive/usr/bradenf4     raw data (read only) and archived results
 AFNI_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_firstlvl     # [shared] input: single-trial betas
-FMRIPREP_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/fmriprep      # [shared] input: brain masks
 GROUP_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_group       # [shared] input: group maps
 TRR_OUT=/nobackup/autodelete/usr/bradenf4/Spirituality/derivatives/afni_trr           # [shared] output
 PARTICIPANTS_TSV=/nobackup/archive/usr/bradenf4/Nielsen_active/Spirituality/Project/rawdata/participants.tsv  # [shared]
@@ -275,11 +277,11 @@ for TASK in "${TASKS[@]}"; do
     #   rating the 1-4 rating (column 3)
     #   cond   low / high   (column 4)
     #   InputFile  inputs/<PREFIX>_trial-NNN.nii.gz (relative path)
-    # The run's fMRIPrep brain mask is also added to the list for STEP 4.
+    # The run's beta bucket is also added to the list for STEP 4.
     # --------------------------------------------------------------------------
     TABLE=${TRR_OUT}/trials_task-${TASK}.tsv
     printf 'Subj\tsess\ttrial\trating\tcond\tInputFile\n' > "${TABLE}"
-    MASKS=""
+    BETAS=""
     for sid in "${SUBS[@]}"; do
         for SES in "${SES1}" "${SES2}"; do
             ST=${AFNI_OUT}/${sid}/${SES}/task-${TASK}/single_trial
@@ -296,7 +298,7 @@ for TASK in "${TASKS[@]}"; do
             awk -F'\t' -v s="${sid}" -v ses="${seslab}" -v pre="${PREFIX}" '
                 NR>1 { printf "%s\t%s\t%d\t%s\t%s\tinputs/%s_trial-%03d.nii.gz\n", s, ses, $1, $3, $4, pre, $1 }
             ' "${TRIALS}" >> "${TABLE}"
-            MASKS="${MASKS} ${FMRIPREP_OUT}/${sid}/${SES}/func/${PREFIX}_space-MNI152NLin2009cAsym_desc-brain_mask.nii.gz"
+            BETAS="${BETAS} ${ST}/${PREFIX}_IM_betas+tlrc"
         done
     done
 
@@ -315,13 +317,29 @@ for TASK in "${TASKS[@]}"; do
     echo "  trial table: ${TABLE} ($(($(wc -l < "${TABLE}") - 1)) trials)"
 
     # --------------------------------------------------------------------------
-    # STEP 4. Build the task's analysis mask.
+    # STEP 4. Build the task's mask: voxels with a non-zero beta for every
+    #         trial of every included run.
     #
-    # 3dmask_tool -frac 1.0 keeps only voxels that are inside EVERY included
-    # run's fMRIPrep brain mask (both sessions of every participant).
+    # 3dmask_tool treats every sub-brick of every input as one mask (a voxel
+    # is "in" a mask when it is non-zero), and -frac 1.0 keeps only voxels
+    # that are in ALL of them. Input = every included run's _IM_betas bucket
+    # (one sub-brick per trial), so a voxel survives only if every trial of
+    # both sessions of every participant has a non-zero beta there.
+    # WHY not fMRIPrep's brain masks (used until 2026-10-24): the betas are
+    # exactly 0 outside each run's first-level analysis mask, which also drops
+    # voxels without data at every time point. Those voxels are inside
+    # fMRIPrep's mask, so they would enter 3dLMEr -TRR as real zero betas.
+    # This matches the group mask of second_level_afni.sh and the whole-brain
+    # mask of reproducibility_afni.sh (non-zero betas in every run).
     # --------------------------------------------------------------------------
     TMASK=${TRR_OUT}/mask_task-${TASK}.nii.gz
-    ${AFNI} "3dmask_tool -overwrite -input ${MASKS} -frac 1.0 -prefix ${TMASK}"
+    rm -f "${TMASK}"
+    ${AFNI} "3dmask_tool -input ${BETAS} -frac 1.0 -prefix ${TMASK}"
+    if [ ! -f "${TMASK}" ]; then
+        echo "ERROR task-${TASK}: could not build ${TMASK}" >&2
+        continue
+    fi
+    echo "  mask: $(${AFNI} "3dBrickStat -count -non-zero ${TMASK}" 2>/dev/null | tail -n1 | awk '{print $1}') voxels (non-zero beta for every trial of every run) -> ${TMASK}"
 
     # --------------------------------------------------------------------------
     # STEP 5. Make ROIs from the group mean_response map.

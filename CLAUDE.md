@@ -136,6 +136,9 @@ copy `afni_trr/` + `afni_reproducibility/` to the local Mac → `local_r_steps.s
   both sessions** (since 2026-10-24; was 3dAutomask of tedana BOLD, which did not match the GLM
   mask and let zero-beta voxels count as agreement in spatial_r/spatial_icc and enter 3dFWHMx /
   3dClustSim). Group masks elsewhere are already "non-zero in every input" or intersections.
+- **trr_export_afni.sh mask_task-T = non-zero single-trial beta for every trial of every included
+  run** (3dmask_tool -frac 1.0 on the _IM_betas buckets; since 2026-10-24, was the intersection of
+  fMRIPrep brain masks). Used as the 3dLMEr -TRR mask and the 3dClusterize search mask for ROIs.
 - 3dICC now runs on the cluster inside `reproducibility_afni.sh`. `3dLMEr -TRR` and `TRR`
   are still run via `local_r_steps.sh` (Mac) — not yet tested on the cluster image.
 - **`3dLMEr -TRR` hard-codes exactly 2 conditions × 2 sessions** (`runTRR` in 3dLMEr.R).
