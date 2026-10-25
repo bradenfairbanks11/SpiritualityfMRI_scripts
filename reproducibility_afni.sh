@@ -420,8 +420,10 @@ dice_pair() {  # args: description  mask  map_a  map_b
 
 # session_clust_k residuals mask prefix  ->  prints k, the minimum cluster size
 # (in voxels) for one session.
-#   1. 3dFWHMx -acf fits the spatial autocorrelation of that session's REML
-#      residuals inside the mask, ACF(r) = a*exp(-r^2/(2b^2)) + (1-a)*exp(-r/c),
+#   1. 3dFWHMx -detrend -acf fits the spatial autocorrelation of that session's
+#      REML residuals inside the mask, using only the uncensored volumes
+#      (<PREFIX>_motion_censor.1D), as afni_proc.py does,
+#      ACF(r) = a*exp(-r^2/(2b^2)) + (1-a)*exp(-r/c),
 #      and prints the parameters a b c on its last line. (It also writes the
 #      ACF curve to <prefix>_acf.1D.)
 #   2. 3dClustSim -acf a b c simulates noise with that smoothness inside the
@@ -430,12 +432,20 @@ dice_pair() {  # args: description  mask  map_a  map_b
 #      It uses SLURM_CPUS_PER_TASK cores (4 if that is not set).
 #   3. k is read from the NN1 bisided table (first data row, second column)
 #      and rounded up to a whole voxel.
-#   The tables are re-made only if they do not exist yet or the residuals are
-#   newer than them. Prints nothing if 3dFWHMx fails.
+#   The tables are re-made only if they do not exist yet, the residuals are
+#   newer than them, or they were made with an older smoothness method
+#   (<prefix>.method). Prints nothing if 3dFWHMx fails.
 session_clust_k() {  # args: errts_dataset(no .HEAD)  mask  prefix
-    local errts="$1" mask="$2" pre="$3" acf a b c k
-    if [ ! -f "${pre}.NN1_bisided.1D" ] || [ "${errts}.HEAD" -nt "${pre}.NN1_bisided.1D" ]; then
-        acf=$(${AFNI} "3dFWHMx -acf ${pre}_acf.1D -mask ${mask} -input ${errts}" 2>/dev/null | tail -n1)
+    local errts="$1" mask="$2" pre="$3" acf a b c k censor keep sel
+    local method="detrend+uncensored"
+    if [ ! -f "${pre}.NN1_bisided.1D" ] || [ "${errts}.HEAD" -nt "${pre}.NN1_bisided.1D" ] \
+       || [ "$(cat "${pre}.method" 2>/dev/null)" != "${method}" ]; then
+        # Uncensored volumes only (censored ones are 0 in errts), as afni_proc.py does.
+        censor=${errts%_errts_REML+tlrc}_motion_censor.1D
+        keep=""
+        [ -f "${censor}" ] && keep=$(${AFNI} "1d_tool.py -infile ${censor} -show_trs_uncensored encoded" 2>/dev/null | tail -n1)
+        sel=""; [ -n "${keep}" ] && sel="'[${keep}]'"
+        acf=$(${AFNI} "3dFWHMx -detrend -acf ${pre}_acf.1D -mask ${mask} -input ${errts}${sel}" 2>/dev/null | tail -n1)
         read -r a b c _ <<< "${acf}"
         if [ -z "${c}" ]; then
             echo "  WARN: 3dFWHMx -acf failed on ${errts}; no cluster threshold" >&2
@@ -443,6 +453,7 @@ session_clust_k() {  # args: errts_dataset(no .HEAD)  mask  prefix
         fi
         ${AFNI} "OMP_NUM_THREADS=${SLURM_CPUS_PER_TASK:-4} 3dClustSim -mask ${mask} -acf ${a} ${b} ${c} \
             -pthr ${CLUST_PTHR} -athr ${CLUST_ATHR} -quiet -prefix ${pre}" >/dev/null 2>&1
+        printf '%s\n' "${method}" > "${pre}.method"
     fi
     k=$(awk '!/^#/ && NF>=2 { k=$2; print (k==int(k)) ? k : int(k)+1; exit }' "${pre}.NN1_bisided.1D" 2>/dev/null)
     printf '%s' "${k}"

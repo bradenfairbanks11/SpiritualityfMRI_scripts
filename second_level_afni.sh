@@ -114,8 +114,9 @@
 #                    cluster tables; makes the output z-scores) is added only
 #                    when there are >= 14 datasets in total.
 #   Cluster table  : spatial smoothness (ACF model a, b, c) estimated with
-#                    3dFWHMx -acf on every included first-level REML residual
-#                    time series inside the group mask, averaged over runs;
+#                    3dFWHMx -detrend -acf on every included first-level REML
+#                    residual time series (uncensored volumes only) inside the
+#                    group mask, averaged over runs;
 #                    3dClustSim with voxelwise p = 0.001 and alpha = 0.05.
 # ==============================================================================
 
@@ -668,12 +669,16 @@ done
 # depends only on the mask, the smoothness of the noise and CLUST_PTHR, not on
 # the number of participants, so it can be used for the 3dMEMA maps and for
 # small-n 3dttest++ maps.
-#   (a) 3dFWHMx -acf: for every first-level REML residual time series
+#   (a) 3dFWHMx -detrend -acf: for every first-level REML residual time series
 #       (<PREFIX>_errts_REML+tlrc) that is not excluded, estimate how the noise
-#       is correlated across space, inside the group mask. The fit is
+#       is correlated across space, inside the group mask. Only the uncensored
+#       volumes are used (from <PREFIX>_motion_censor.1D; censored volumes are 0
+#       in errts), and each voxel's trend is removed first, as afni_proc.py
+#       does. Without these, one run (sub-19 ses-2) gave FWHM 5.4 mm instead of
+#       8.1 mm. The fit is
 #       ACF(r) = a*exp(-r^2/(2*b^2)) + (1-a)*exp(-r/c); the last line of the
 #       output holds a, b, c (and an effective FWHM). One line per run goes into
-#       clustsim/acf_params.txt. (acf_est.1D, the empirical curve, is
+#       clustsim/acf_params.txt (a b c FWHM run). (acf_est.1D, the empirical curve, is
 #       overwritten by each run.)
 #   (b) a, b, c are averaged over runs.
 #   (c) 3dClustSim simulates noise with that smoothness inside the group mask
@@ -695,8 +700,17 @@ for ERRTS in "${AFNI_FIRSTLVL}"/sub-*/ses-*/task-*/*_errts_REML+tlrc.HEAD; do
     _p=$(basename "$(dirname "$(dirname "$(dirname "${ERRTS}")")")")
     is_excluded "${_p}" "${_s}" "${_t#task-}" >/dev/null && continue
     dset=${ERRTS%.HEAD}
-    line=$(${AFNI} "3dFWHMx -acf ${CLUSTDIR}/acf_est.1D -mask ${GROUPMASK} -input ${dset} 2>/dev/null" | tail -n1)
-    echo "${line}" >> "${acf_file}"
+    # Uncensored volumes only (censored ones are 0 in errts), as afni_proc.py does.
+    censor=${dset%_errts_REML+tlrc}_motion_censor.1D
+    if [ -f "${censor}" ]; then
+        keep=$(${AFNI} "1d_tool.py -infile ${censor} -show_trs_uncensored encoded" 2>/dev/null | tail -n1)
+    else
+        echo "  WARNING: no ${censor##*/}; using every volume of ${dset##*/}"
+        keep=""
+    fi
+    sel=""; [ -n "${keep}" ] && sel="'[${keep}]'"
+    line=$(${AFNI} "3dFWHMx -detrend -acf ${CLUSTDIR}/acf_est.1D -mask ${GROUPMASK} -input ${dset}${sel} 2>/dev/null" | tail -n1)
+    echo "${line} ${dset##*/}" >> "${acf_file}"
 done
 
 if [ -s "${acf_file}" ]; then
