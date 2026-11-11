@@ -43,7 +43,7 @@
 #                    containing "Nielsen") holds the series folders:
 #                      MR Minn_2.5mm_ME4_S4p2_TASK<n>          multi-echo BOLD
 #                      MR Minn_2.5mm_ME4_S4p2_TASK<n>_SBRef    its SBRef
-#                      MR T1w_MPR_ND, MR T2w_SPC_ND            anatomicals (ND = not distortion-corrected)
+#                      MR T1w_MPR, MR T2w_SPC                  anatomicals
 #                      MR CMRR_SEFM_2.5mm_S4p2_AP<n> / _PA<n>  fieldmaps
 #   run order      : <RAWDATA_DIR>/run_order_plain.tsv
 #                    column 1 = alphanumeric id, column 2 = session-1 order,
@@ -138,8 +138,8 @@ export PYTHONNOUSERSITE=1
 #   its DICOMs can produce:
 #     - 4 *_bold.nii.gz files (one per echo) per TASK series   (func)
 #     - one *_epi.nii.gz per AP or PA fieldmap series          (fmap)
-#     - a *_T1w.nii.gz if there is a "MR T1w_MPR_ND" series    (anat)
-#     - a *_T2w.nii.gz if there is a "MR T2w_SPC_ND" series    (anat)
+#     - a *_T1w.nii.gz if there is a "MR T1w_MPR" series       (anat)
+#     - a *_T2w.nii.gz if there is a "MR T2w_SPC" series       (anat)
 #   ("Has at least" that many files counts as complete. SBRef files are not
 #   counted.) It uses the SAME series-name patterns as the conversion steps, so
 #   "expected" always matches "what this script would actually write". An
@@ -152,8 +152,8 @@ session_is_complete() {
     src_task=$(find "${dicom_dir}" -maxdepth 1 -type d -name "*Minn_2.5mm_ME4_S4p2_TASK*" ! -name "*SBRef*" 2>/dev/null | wc -l)
     src_ap=$(find "${dicom_dir}" -maxdepth 1 -type d -name "*CMRR_SEFM_2.5mm_S4p2_AP*" 2>/dev/null | wc -l)
     src_pa=$(find "${dicom_dir}" -maxdepth 1 -type d -name "*CMRR_SEFM_2.5mm_S4p2_PA*" 2>/dev/null | wc -l)
-    [ -d "${dicom_dir}/MR T1w_MPR_ND" ] && src_t1=1 || src_t1=0
-    [ -d "${dicom_dir}/MR T2w_SPC_ND" ] && src_t2=1 || src_t2=0
+    [ -d "${dicom_dir}/MR T1w_MPR" ] && src_t1=1 || src_t1=0
+    [ -d "${dicom_dir}/MR T2w_SPC" ] && src_t2=1 || src_t2=0
     exp_bold=$(( src_task * 4 ))   # ME4 protocol = 4 echoes per task run
     exp_epi=$(( src_ap + src_pa ))
 
@@ -364,18 +364,18 @@ for ses in "${sorted_folders[@]}"; do
     # --------------------------------------------------------------------------
     # STEP 7. Convert the anatomical scans: T1w and T2w.
     #
-    # Only the folders named exactly "MR T1w_MPR_ND" and "MR T2w_SPC_ND" are used
-    # (the ND = "no distortion correction" variants, not the scanner-corrected
-    # images). Each is converted only if it exists.
+    # Only the folders named exactly "MR T1w_MPR" and "MR T2w_SPC" are used
+    # (the standard images, not the ND variants). Each is converted only if it
+    # exists.
     # --------------------------------------------------------------------------
-    if [ -d "${dicom_dir}/MR T1w_MPR_ND" ]; then
+    if [ -d "${dicom_dir}/MR T1w_MPR" ]; then
         dcm2niix -b y -ba y -z y -i y -w 1 -o "${anat_dir}" \
-            -f "${name_string}_T1w" "${dicom_dir}/MR T1w_MPR_ND/"
+            -f "${name_string}_T1w" "${dicom_dir}/MR T1w_MPR/"
     fi
 
-    if [ -d "${dicom_dir}/MR T2w_SPC_ND" ]; then
+    if [ -d "${dicom_dir}/MR T2w_SPC" ]; then
         dcm2niix -b y -ba y -z y -i y -w 1 -o "${anat_dir}" \
-            -f "${name_string}_T2w" "${dicom_dir}/MR T2w_SPC_ND/"
+            -f "${name_string}_T2w" "${dicom_dir}/MR T2w_SPC/"
     fi
 
     # --------------------------------------------------------------------------
